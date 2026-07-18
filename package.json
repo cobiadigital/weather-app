@@ -1,0 +1,13 @@
+{
+  "name": "weather-radar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local NEXRAD weather radar from the National Weather Service, served by a Cloudflare Worker.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
