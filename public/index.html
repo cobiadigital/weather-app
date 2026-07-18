@@ -16,8 +16,13 @@
     <!-- Behaves more like an app when added to the iOS home screen. -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Local Radar" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Local Radar</title>
+
+    <!-- Installable web app (Add to Home Screen). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
 
     <link
       rel="stylesheet"
@@ -68,6 +73,37 @@
           <span class="btn-ico" aria-hidden="true">↻</span>
         </button>
       </div>
+
+      <!-- Layer + mode toggles -->
+      <div class="control-row toggles">
+        <button
+          id="cloudsBtn"
+          class="btn toggle"
+          type="button"
+          aria-pressed="false"
+        >
+          <span class="btn-ico" aria-hidden="true">☁</span>
+          <span>Clouds</span>
+        </button>
+        <button
+          id="loopBtn"
+          class="btn toggle"
+          type="button"
+          aria-pressed="false"
+        >
+          <span class="btn-ico" aria-hidden="true">◷</span>
+          <span>Loop 4h</span>
+        </button>
+        <button
+          id="installBtn"
+          class="btn toggle hidden"
+          type="button"
+        >
+          <span class="btn-ico" aria-hidden="true">⤓</span>
+          <span>Install</span>
+        </button>
+      </div>
+
       <div class="control-row slider-row">
         <label for="opacity" class="slider-label">Radar</label>
         <input
@@ -81,8 +117,41 @@
         />
         <span id="opacityVal" class="slider-val">70%</span>
       </div>
+
+      <!-- Radar-loop timeline (hidden until Loop is on) -->
+      <div id="loopBar" class="control-row loop-row hidden">
+        <button id="playBtn" class="icon-btn" type="button" aria-label="Pause loop">⏸</button>
+        <input
+          id="loopScrub"
+          class="slider"
+          type="range"
+          min="0"
+          max="47"
+          value="47"
+          aria-label="Radar loop time"
+        />
+        <span id="loopTime" class="slider-val loop-time">--:--</span>
+      </div>
+
       <div id="status" class="status">Loading radar…</div>
     </footer>
+
+    <!-- iOS "Add to Home Screen" instructions (Safari can't prompt directly) -->
+    <section id="installSheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2>Add to Home Screen</h2>
+        <button id="installClose" class="icon-btn" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="install-steps">
+        <p>Install Local Radar as an app for full-screen, one-tap access:</p>
+        <ol>
+          <li>Tap the <strong>Share</strong> button <span class="ios-share" aria-hidden="true">􀈂</span> in Safari's toolbar.</li>
+          <li>Scroll down and choose <strong>Add to Home Screen</strong>.</li>
+          <li>Tap <strong>Add</strong> — the radar icon appears on your home screen.</li>
+        </ol>
+      </div>
+    </section>
 
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"

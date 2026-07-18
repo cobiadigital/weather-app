@@ -24,11 +24,29 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
 
 ## Data sources
 
-- **Radar tiles** — Iowa Environmental Mesonet NEXRAD N0Q composite:
+- **Radar tiles (live)** — Iowa Environmental Mesonet NEXRAD N0Q composite:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png`
   (standard web-mercator `{z}/{x}/{y}` tiles; refreshes ~every 5 min).
+- **Radar loop (last 4 h)** — IEM's time-enabled NEXRAD WMS
+  `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
+  `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
+  `app.js` loads this via `L.tileLayer.wms` and steps the `time` param across
+  48 frames. It's a different endpoint than the live tile cache above.
+- **Clouds (satellite)** — GOES East infrared composite, also from IEM:
+  `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
+  NEXRAD is precipitation only, so cloud cover comes from this separate GOES
+  satellite product (companions exist: `goes-vis-1km-900913`,
+  `goes-wv-4km-900913`).
 - **Alerts / conditions** — the NWS API (`api.weather.gov`), always reached via
   the Worker proxy at `/api/nws/...`, never called directly from the browser.
+
+## PWA / install
+
+`public/manifest.webmanifest` + `public/icons/*` make the app installable.
+`index.html` links the manifest and an `apple-touch-icon`. The **Install**
+button uses the `beforeinstallprompt` event on Android/Chrome and falls back to
+an iOS "Add to Home Screen" instructions sheet. Icons are generated PNGs — if
+you change the icon, regenerate all sizes (192, 512, maskable-512, 180 apple).
 
 ## Conventions & constraints
 

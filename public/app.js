@@ -16,10 +16,32 @@
   const RADAR_TILE_URL =
     "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png";
 
+  // Time-enabled NEXRAD N0Q WMS (IEM "time machine"). Serves any 5-minute
+  // composite from the archive via the WMS TIME parameter, which is how we
+  // build the last-4-hours loop. See mesonet.agron.iastate.edu/ogc/.
+  const RADAR_WMS_URL =
+    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi";
+  const RADAR_WMS_LAYER = "nexrad-n0q-wmst";
+
+  // GOES East infrared composite from IEM. This is *satellite* cloud imagery
+  // (NOT part of the NEXRAD radar product) — infrared shows cloud cover day and
+  // night. Same {z}/{x}/{y} tile scheme as the radar layer.
+  const CLOUD_TILE_URL =
+    "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png";
+
   const DEFAULT_VIEW = { lat: 39.5, lon: -98.35, zoom: 4 }; // continental US
   const LOCATED_ZOOM = 9;
   const REFRESH_MS = 5 * 60 * 1000; // auto-refresh radar every 5 minutes
   const STORE_KEY = "radar.lastLocation";
+
+  // Radar loop: 4 hours of frames at 5-minute spacing (48 frames), advanced
+  // roughly twice a second. IEM composites lag real time by a few minutes, so
+  // we end the loop one step back from "now" to avoid requesting a blank frame.
+  const LOOP_HOURS = 4;
+  const LOOP_STEP_MIN = 5;
+  const LOOP_FRAME_COUNT = (LOOP_HOURS * 60) / LOOP_STEP_MIN; // 48
+  const LOOP_LAG_MIN = 5;
+  const LOOP_PLAY_MS = 500;
 
   const els = {
     status: document.getElementById("status"),
@@ -32,12 +54,33 @@
     alertSheet: document.getElementById("alertSheet"),
     alertList: document.getElementById("alertList"),
     alertClose: document.getElementById("alertClose"),
+    cloudsBtn: document.getElementById("cloudsBtn"),
+    loopBtn: document.getElementById("loopBtn"),
+    installBtn: document.getElementById("installBtn"),
+    installSheet: document.getElementById("installSheet"),
+    installClose: document.getElementById("installClose"),
+    loopBar: document.getElementById("loopBar"),
+    playBtn: document.getElementById("playBtn"),
+    loopScrub: document.getElementById("loopScrub"),
+    loopTime: document.getElementById("loopTime"),
   };
 
   let map;
-  let radarLayer;
+  let radarLayer; // live radar (current frame)
+  let cloudLayer; // GOES satellite cloud layer (optional)
+  let loopLayer; // time-enabled WMS layer used while looping
   let meMarker;
   let refreshTimer;
+
+  // Radar-loop state.
+  let loopOn = false;
+  let loopPlaying = false;
+  let loopTimer;
+  let loopFrames = []; // array of Date objects, oldest -> newest
+  let loopIndex = 0;
+
+  // Deferred PWA install prompt (Chrome/Android). Null on iOS Safari.
+  let deferredInstallPrompt = null;
 
   // --- Map setup -----------------------------------------------------------
 
@@ -87,7 +130,7 @@
   // latest NEXRAD frame. Leaflet keeps the old tiles visible until the new
   // ones load, so there's no flash.
   function refreshRadar(userInitiated) {
-    if (!radarLayer) return;
+    if (!radarLayer || loopOn) return; // the loop drives its own frames
     radarLayer.setUrl(RADAR_TILE_URL + "?_=" + Date.now());
     if (userInitiated) {
       els.refreshBtn.classList.add("spin");
@@ -237,7 +280,10 @@
     const v = Number(els.opacity.value);
     els.opacityVal.textContent = v + "%";
     els.opacity.style.setProperty("--fill", v + "%");
-    if (radarLayer) radarLayer.setOpacity(sliderToOpacity(v));
+    // The slider controls whichever precipitation layer is showing.
+    const op = sliderToOpacity(v);
+    if (radarLayer) radarLayer.setOpacity(op);
+    if (loopLayer) loopLayer.setOpacity(op);
   }
 
   function sliderToOpacity(v) {
@@ -266,6 +312,197 @@
     return null;
   }
 
+  // --- Cloud (satellite) layer ---------------------------------------------
+
+  // GOES infrared satellite imagery. This is a different product than the
+  // NEXRAD radar (which only shows precipitation), so it's an optional overlay
+  // rather than something baked into the radar tiles.
+  function toggleClouds() {
+    if (cloudLayer) {
+      map.removeLayer(cloudLayer);
+      cloudLayer = null;
+      setToggle(els.cloudsBtn, false);
+      setStatus("Cloud layer off.");
+      return;
+    }
+    cloudLayer = L.tileLayer(CLOUD_TILE_URL, {
+      opacity: 0.5,
+      attribution:
+        'Clouds: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NOAA GOES',
+      zIndex: 4, // below the radar (zIndex 5)
+      maxZoom: 15,
+    }).addTo(map);
+    setToggle(els.cloudsBtn, true);
+    setStatus("Cloud cover (GOES satellite) on.");
+  }
+
+  // --- Radar loop (last 4 hours) -------------------------------------------
+
+  function toggleLoop() {
+    loopOn ? stopLoop() : startLoop();
+  }
+
+  function startLoop() {
+    loopOn = true;
+    setToggle(els.loopBtn, true);
+    els.loopBar.classList.remove("hidden");
+
+    // Live radar and the loop show the same product, so hide the live layer
+    // while the loop drives the display.
+    if (radarLayer) map.removeLayer(radarLayer);
+
+    buildLoopFrames();
+    loopIndex = loopFrames.length - 1; // start at the most recent frame
+
+    loopLayer = L.tileLayer.wms(RADAR_WMS_URL, {
+      layers: RADAR_WMS_LAYER,
+      format: "image/png",
+      transparent: true,
+      time: isoUTC(loopFrames[loopIndex]),
+      opacity: sliderToOpacity(els.opacity.value),
+      attribution:
+        'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
+      zIndex: 5,
+      maxZoom: 15,
+    }).addTo(map);
+
+    els.loopScrub.max = String(loopFrames.length - 1);
+    els.loopScrub.value = String(loopIndex);
+    updateLoopLabel();
+    playLoop();
+  }
+
+  function stopLoop() {
+    loopOn = false;
+    pauseLoop();
+    setToggle(els.loopBtn, false);
+    els.loopBar.classList.add("hidden");
+
+    if (loopLayer) {
+      map.removeLayer(loopLayer);
+      loopLayer = null;
+    }
+    // Restore the live radar.
+    if (radarLayer) {
+      radarLayer.addTo(map);
+      refreshRadar(false);
+    }
+    setStatus("Showing live radar.");
+  }
+
+  // Build 48 frame timestamps at 5-minute spacing, ending one lag-step back
+  // from now (snapped down to the 5-minute grid the composites are built on).
+  function buildLoopFrames() {
+    const now = Date.now();
+    const step = LOOP_STEP_MIN * 60 * 1000;
+    let latest = Math.floor((now - LOOP_LAG_MIN * 60 * 1000) / step) * step;
+    loopFrames = [];
+    for (let i = LOOP_FRAME_COUNT - 1; i >= 0; i--) {
+      loopFrames.push(new Date(latest - i * step));
+    }
+  }
+
+  function showLoopFrame(i) {
+    loopIndex = Math.max(0, Math.min(loopFrames.length - 1, i));
+    if (loopLayer) loopLayer.setParams({ time: isoUTC(loopFrames[loopIndex]) });
+    els.loopScrub.value = String(loopIndex);
+    updateLoopLabel();
+  }
+
+  function playLoop() {
+    loopPlaying = true;
+    els.playBtn.textContent = "⏸";
+    els.playBtn.setAttribute("aria-label", "Pause loop");
+    clearInterval(loopTimer);
+    loopTimer = setInterval(() => {
+      // Loop back to the start, but pause a beat on the newest frame.
+      let next = loopIndex + 1;
+      if (next >= loopFrames.length) next = 0;
+      showLoopFrame(next);
+    }, LOOP_PLAY_MS);
+  }
+
+  function pauseLoop() {
+    loopPlaying = false;
+    clearInterval(loopTimer);
+    els.playBtn.textContent = "▶";
+    els.playBtn.setAttribute("aria-label", "Play loop");
+  }
+
+  function togglePlay() {
+    loopPlaying ? pauseLoop() : playLoop();
+  }
+
+  function onScrub() {
+    pauseLoop();
+    showLoopFrame(Number(els.loopScrub.value));
+  }
+
+  function updateLoopLabel() {
+    const d = loopFrames[loopIndex];
+    if (!d) return;
+    const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const newest = loopIndex === loopFrames.length - 1;
+    els.loopTime.textContent = newest ? "Now" : t;
+    els.status.textContent = "Radar loop · " + t;
+  }
+
+  // --- Install (Add to Home Screen) ----------------------------------------
+
+  function isStandalone() {
+    return (
+      window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true
+    );
+  }
+
+  function isIOS() {
+    return (
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      // iPadOS 13+ reports as a Mac, but has touch.
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+    );
+  }
+
+  // Decide whether to surface the Install button. Chrome/Android fire
+  // `beforeinstallprompt` (handled separately); iOS Safari never does, so we
+  // offer manual instructions there instead.
+  function updateInstallAffordance() {
+    if (isStandalone()) {
+      els.installBtn.classList.add("hidden");
+      return;
+    }
+    if (deferredInstallPrompt || isIOS()) {
+      els.installBtn.classList.remove("hidden");
+    }
+  }
+
+  async function onInstall() {
+    if (deferredInstallPrompt) {
+      deferredInstallPrompt.prompt();
+      try {
+        await deferredInstallPrompt.userChoice;
+      } catch (_) {
+        /* ignore */
+      }
+      deferredInstallPrompt = null;
+      els.installBtn.classList.add("hidden");
+      return;
+    }
+    // iOS / anything without a native prompt: show manual instructions.
+    openInstallSheet();
+  }
+
+  function openInstallSheet() {
+    els.installSheet.classList.remove("hidden");
+    els.installSheet.setAttribute("aria-hidden", "false");
+  }
+
+  function closeInstallSheet() {
+    els.installSheet.classList.add("hidden");
+    els.installSheet.setAttribute("aria-hidden", "true");
+  }
+
   // --- Helpers -------------------------------------------------------------
 
   function setStatus(msg, isError) {
@@ -278,6 +515,16 @@
       hour: "numeric",
       minute: "2-digit",
     });
+  }
+
+  // Reflect a toggle button's on/off state (drives styling + a11y).
+  function setToggle(btn, on) {
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  // WMS TIME wants ISO-8601 UTC with no milliseconds, e.g. 2026-07-18T17:35:00Z.
+  function isoUTC(date) {
+    return date.toISOString().replace(/\.\d+Z$/, "Z");
   }
 
   function esc(s) {
@@ -300,12 +547,32 @@
     els.opacity.addEventListener("input", onOpacity);
     els.alertPill.addEventListener("click", openSheet);
     els.alertClose.addEventListener("click", closeSheet);
+    els.cloudsBtn.addEventListener("click", toggleClouds);
+    els.loopBtn.addEventListener("click", toggleLoop);
+    els.playBtn.addEventListener("click", togglePlay);
+    els.loopScrub.addEventListener("input", onScrub);
+    els.installBtn.addEventListener("click", onInstall);
+    els.installClose.addEventListener("click", closeInstallSheet);
 
-    // Refresh radar when returning to the tab (iOS suspends background tabs).
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") refreshRadar(false);
+    // Chrome/Android: capture the native install prompt for our own button.
+    window.addEventListener("beforeinstallprompt", (e) => {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      updateInstallAffordance();
+    });
+    window.addEventListener("appinstalled", () => {
+      deferredInstallPrompt = null;
+      els.installBtn.classList.add("hidden");
+      closeInstallSheet();
     });
 
+    // Refresh radar when returning to the tab (iOS suspends background tabs).
+    // Don't clobber the loop if it's the active view.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && !loopOn) refreshRadar(false);
+    });
+
+    updateInstallAffordance();
     onOpacity(); // sync the slider fill + layer opacity to the default value
   }
 

@@ -18,9 +18,25 @@ All data is public and comes from the **National Weather Service**:
 - Full-screen dark map with a live radar overlay
 - **My location** button (uses your device GPS) and remembers your last spot
 - Radar **opacity slider** and manual **refresh**; radar auto-refreshes every 5 min
+- **Loop 4h** — animate the last 4 hours of radar with a play/pause + scrubber
+  and a timestamp, so you can see where the weather is heading
+- **Clouds** — optional GOES satellite (infrared) cloud-cover overlay
+- **Install** — add it to your home screen as a full-screen app (a native
+  prompt on Android/Chrome, guided steps on iOS Safari)
 - Active-alert pill that opens a slide-up sheet with alert details
 - Designed for phones — iOS Safari safe-area insets, large tap targets,
   dynamic viewport height, no rubber-band scrolling
+
+## Data sources
+
+- **Radar (live + loop)** — NEXRAD N0Q base-reflectivity composite from the
+  [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/). The live
+  view uses IEM's current tile cache; the loop uses IEM's time-enabled NEXRAD
+  WMS (`n0q-t.cgi`, 5-minute archive) to fetch each of the past 48 frames.
+- **Clouds** — GOES East infrared satellite composite, also from IEM. This is a
+  separate *satellite* product (it shows cloud cover, not precipitation); the
+  NEXRAD radar product does not include cloud coverage.
+- **Alerts** — the NWS API, proxied through the Worker (see below).
 
 ## Project layout
 
