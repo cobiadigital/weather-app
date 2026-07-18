@@ -49,7 +49,7 @@ Since Wrangler isn't required to deploy:
    (`npx wrangler deploy`).
 4. Save & deploy. Every commit to the connected branch redeploys.
 
-Your app will be available at `https://weather-radar.<your-subdomain>.workers.dev`.
+Your app will be available at `https://weather-app.<your-subdomain>.workers.dev`.
 
 ## Local development (optional)
 

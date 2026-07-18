@@ -1,5 +1,5 @@
 {
-  "name": "weather-radar",
+  "name": "weather-app",
   "version": "1.0.0",
   "private": true,
   "description": "Local NEXRAD weather radar from the National Weather Service, served by a Cloudflare Worker.",
