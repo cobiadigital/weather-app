@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- viewport-fit=cover lets the map extend under the iPhone notch / home bar;
+         we then pad the UI back in with env(safe-area-inset-*). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b1220" />
+    <meta
+      name="description"
+      content="Local weather radar from the National Weather Service."
+    />
+    <!-- Behaves more like an app when added to the iOS home screen. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Local Radar</title>
+
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%A7%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="map" role="application" aria-label="Weather radar map"></div>
+
+    <!-- Top bar: title + active-alert pill -->
+    <header class="topbar">
+      <div class="title">
+        <span class="dot" aria-hidden="true"></span>
+        Local Radar
+      </div>
+      <button
+        id="alertPill"
+        class="alert-pill hidden"
+        type="button"
+        aria-expanded="false"
+      >
+        <span id="alertPillText">Alerts</span>
+      </button>
+    </header>
+
+    <!-- Slide-up alert details -->
+    <section id="alertSheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2 id="alertSheetTitle">Active Alerts</h2>
+        <button id="alertClose" class="icon-btn" type="button" aria-label="Close alerts">✕</button>
+      </div>
+      <div id="alertList" class="alert-list"></div>
+    </section>
+
+    <!-- Bottom control bar -->
+    <footer class="controls">
+      <div class="control-row">
+        <button id="locateBtn" class="btn primary" type="button">
+          <span class="btn-ico" aria-hidden="true">◎</span>
+          <span>My location</span>
+        </button>
+        <button id="refreshBtn" class="btn" type="button" aria-label="Refresh radar">
+          <span class="btn-ico" aria-hidden="true">↻</span>
+        </button>
+      </div>
+      <div class="control-row slider-row">
+        <label for="opacity" class="slider-label">Radar</label>
+        <input
+          id="opacity"
+          class="slider"
+          type="range"
+          min="0"
+          max="100"
+          value="70"
+          aria-label="Radar opacity"
+        />
+        <span id="opacityVal" class="slider-val">70%</span>
+      </div>
+      <div id="status" class="status">Loading radar…</div>
+    </footer>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+name = "weather-radar"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Serve the static front-end (public/) directly from the edge.
+# Requests that don't match a static asset fall through to the Worker
+# in src/index.js (used for the /api/nws/* National Weather Service proxy).
+[assets]
+directory = "./public"
+binding = "ASSETS"
