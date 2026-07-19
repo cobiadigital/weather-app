@@ -41,7 +41,9 @@
   const LOOP_STEP_MIN = 5;
   const LOOP_FRAME_COUNT = (LOOP_HOURS * 60) / LOOP_STEP_MIN; // 48
   const LOOP_LAG_MIN = 5;
-  const LOOP_PLAY_MS = 500;
+  const LOOP_PLAY_MS = 500; // ms per frame while playing
+  const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
+  const LOOP_SAFETY_MS = 25000; // start playing even if some frames stall loading
 
   const els = {
     status: document.getElementById("status"),
@@ -71,14 +73,17 @@
   let map;
   let radarLayer; // live radar (current frame)
   let cloudLayer; // GOES satellite cloud layer (optional)
-  let loopLayer; // time-enabled WMS layer used while looping
   let meMarker;
   let refreshTimer;
 
   // Radar-loop state.
   let loopOn = false;
   let loopPlaying = false;
+  let loopReady = false; // true once frames are preloaded
   let loopTimer;
+  let loopSafety; // fallback timer so a stalled frame can't hang preload
+  let loopLoaded = 0; // how many frame layers have finished loading
+  let loopLayers = []; // one WMS tile layer per frame, parallel to loopFrames
   let loopFrames = []; // array of Date objects, oldest -> newest
   let loopIndex = 0;
 
@@ -348,7 +353,8 @@
     // The slider controls whichever precipitation layer is showing.
     const op = sliderToOpacity(v);
     if (radarLayer) radarLayer.setOpacity(op);
-    if (loopLayer) loopLayer.setOpacity(op);
+    // While looping, only the visible frame should track the slider.
+    if (loopOn && loopLayers[loopIndex]) loopLayers[loopIndex].setOpacity(op);
   }
 
   function sliderToOpacity(v) {
@@ -409,44 +415,96 @@
 
   function startLoop() {
     loopOn = true;
+    loopReady = false;
+    loopLoaded = 0;
     setToggle(els.loopBtn, true);
     els.loopBar.classList.remove("hidden");
+    // Controls stay inert until the frames are preloaded.
+    els.playBtn.disabled = true;
+    els.loopScrub.disabled = true;
 
     // Live radar and the loop show the same product, so hide the live layer
     // while the loop drives the display.
     if (radarLayer) map.removeLayer(radarLayer);
 
     buildLoopFrames();
-    loopIndex = loopFrames.length - 1; // start at the most recent frame
+    loopIndex = loopFrames.length - 1; // start on the most recent frame
 
-    loopLayer = L.tileLayer.wms(RADAR_WMS_URL, {
-      layers: RADAR_WMS_LAYER,
-      format: "image/png",
-      transparent: true,
-      time: isoUTC(loopFrames[loopIndex]),
-      opacity: sliderToOpacity(els.opacity.value),
-      attribution:
-        'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
-      zIndex: 5,
-      maxZoom: 15,
-    }).addTo(map);
+    const op = sliderToOpacity(els.opacity.value);
+    const total = loopFrames.length;
 
-    els.loopScrub.max = String(loopFrames.length - 1);
+    // Anti-strobe strategy: rather than swapping the TIME param on a single
+    // layer (which re-fetches its tiles every frame and flashes blank while
+    // they load), build one tile layer per frame up front. They're all added
+    // at opacity 0 so their tiles preload in the background; animating is then
+    // just flipping opacity between already-loaded layers, so a frame never
+    // disappears mid-loop.
+    loopLayers = loopFrames.map((frame, i) => {
+      const layer = L.tileLayer.wms(RADAR_WMS_URL, {
+        layers: RADAR_WMS_LAYER,
+        format: "image/png",
+        transparent: true,
+        time: isoUTC(frame),
+        // Show the newest frame right away; keep the rest hidden until shown.
+        opacity: i === loopIndex ? op : 0,
+        zIndex: 5,
+        maxZoom: 15,
+        updateWhenIdle: true, // don't refetch every frame while panning
+        keepBuffer: 0, // 48 layers — keep each one's memory footprint small
+        // One attribution entry is plenty (Leaflet de-dupes identical text).
+        attribution:
+          i === 0
+            ? 'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD'
+            : undefined,
+      });
+      layer.once("load", () => onFrameLoaded(total));
+      return layer;
+    });
+    loopLayers.forEach((layer) => layer.addTo(map));
+
+    els.loopScrub.max = String(total - 1);
     els.loopScrub.value = String(loopIndex);
     updateLoopLabel();
+    setStatus("Loading radar loop… 0%");
+
+    // Safety net: if a frame's tiles never finish (server hiccup), start anyway.
+    clearTimeout(loopSafety);
+    loopSafety = setTimeout(markLoopReady, LOOP_SAFETY_MS);
+  }
+
+  function onFrameLoaded(total) {
+    if (!loopOn) return; // loop was stopped mid-preload
+    loopLoaded++;
+    if (!loopReady) {
+      const pct = Math.round((loopLoaded / total) * 100);
+      setStatus("Loading radar loop… " + pct + "%");
+    }
+    if (loopLoaded >= total) markLoopReady();
+  }
+
+  // Preload finished (or timed out) — enable the controls and start playing.
+  function markLoopReady() {
+    if (loopReady || !loopOn) return;
+    loopReady = true;
+    clearTimeout(loopSafety);
+    els.playBtn.disabled = false;
+    els.loopScrub.disabled = false;
     playLoop();
   }
 
   function stopLoop() {
     loopOn = false;
+    loopReady = false;
     pauseLoop();
+    clearTimeout(loopSafety);
     setToggle(els.loopBtn, false);
     els.loopBar.classList.add("hidden");
+    els.playBtn.disabled = false;
+    els.loopScrub.disabled = false;
 
-    if (loopLayer) {
-      map.removeLayer(loopLayer);
-      loopLayer = null;
-    }
+    loopLayers.forEach((layer) => map.removeLayer(layer));
+    loopLayers = [];
+
     // Restore the live radar.
     if (radarLayer) {
       radarLayer.addTo(map);
@@ -467,34 +525,45 @@
     }
   }
 
+  // Reveal frame i by flipping opacity — the layers are already loaded, so
+  // this is instant and never blanks the map.
   function showLoopFrame(i) {
-    loopIndex = Math.max(0, Math.min(loopFrames.length - 1, i));
-    if (loopLayer) loopLayer.setParams({ time: isoUTC(loopFrames[loopIndex]) });
+    const prev = loopIndex;
+    loopIndex = Math.max(0, Math.min(loopLayers.length - 1, i));
+    const op = sliderToOpacity(els.opacity.value);
+    if (loopLayers[prev] && prev !== loopIndex) loopLayers[prev].setOpacity(0);
+    if (loopLayers[loopIndex]) loopLayers[loopIndex].setOpacity(op);
     els.loopScrub.value = String(loopIndex);
     updateLoopLabel();
   }
 
   function playLoop() {
+    if (!loopReady) return; // wait until frames are preloaded
     loopPlaying = true;
     els.playBtn.textContent = "⏸";
     els.playBtn.setAttribute("aria-label", "Pause loop");
-    clearInterval(loopTimer);
-    loopTimer = setInterval(() => {
-      // Loop back to the start, but pause a beat on the newest frame.
+    clearTimeout(loopTimer);
+    // Recursive setTimeout (not setInterval) so we can linger on the newest
+    // frame before wrapping back to the start.
+    const tick = () => {
       let next = loopIndex + 1;
-      if (next >= loopFrames.length) next = 0;
+      if (next >= loopLayers.length) next = 0;
       showLoopFrame(next);
-    }, LOOP_PLAY_MS);
+      const onNewest = loopIndex === loopLayers.length - 1;
+      loopTimer = setTimeout(tick, onNewest ? LOOP_END_DWELL_MS : LOOP_PLAY_MS);
+    };
+    loopTimer = setTimeout(tick, LOOP_PLAY_MS);
   }
 
   function pauseLoop() {
     loopPlaying = false;
-    clearInterval(loopTimer);
+    clearTimeout(loopTimer);
     els.playBtn.textContent = "▶";
     els.playBtn.setAttribute("aria-label", "Play loop");
   }
 
   function togglePlay() {
+    if (!loopReady) return;
     loopPlaying ? pauseLoop() : playLoop();
   }
 
@@ -509,7 +578,7 @@
     const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const newest = loopIndex === loopFrames.length - 1;
     els.loopTime.textContent = newest ? "Now" : t;
-    els.status.textContent = "Radar loop · " + t;
+    if (loopReady) els.status.textContent = "Radar loop · " + t;
   }
 
   // --- Install (Add to Home Screen) ----------------------------------------
