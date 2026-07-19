@@ -60,10 +60,12 @@ button,
 
 #map {
   position: fixed;
+  /* inset:0 pins the map to all four edges of the real viewport. We must NOT
+     also set an explicit height: on iOS home-screen (standalone) apps,
+     100vh/100dvh resolve to less than the true screen height, and because a
+     fixed box with top+bottom+height is over-constrained the height would win
+     and leave a blank strip along the bottom. inset:0 fills the screen. */
   inset: 0;
-  height: 100vh;
-  height: 100dvh; /* dynamic viewport height on modern Safari */
-  width: 100vw;
   background: #0b1220;
   z-index: 0;
 }

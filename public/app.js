@@ -137,6 +137,14 @@
 
     setStatus("Radar loaded.");
     scheduleRefresh();
+
+    // The map fills the screen via CSS inset:0. Re-measure once after layout
+    // settles, and on rotation, so Leaflet loads tiles for the full area
+    // (especially in iOS standalone mode where the size can settle late).
+    setTimeout(() => map.invalidateSize(), 0);
+    window.addEventListener("orientationchange", () => {
+      setTimeout(() => map && map.invalidateSize(), 250);
+    });
   }
 
   // --- Radar refresh -------------------------------------------------------
