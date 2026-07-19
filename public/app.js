@@ -199,13 +199,28 @@
     setStatus("Radar loaded.");
     scheduleRefresh();
 
+    // Stop re-centering the saved location the moment the user drags the map, so
+    // the settle timers below can't yank it back from where they panned.
+    let userPanned = false;
+    map.on("dragstart", () => {
+      userPanned = true;
+    });
+
     // The map fills body, which is sized to var(--vh) (measured innerHeight).
     // The real height in an iOS standalone/web-app can settle late, so as the
     // measured height converges, keep Leaflet's canvas in sync so it loads tiles
     // for the full area. --vh itself is re-measured by setViewportHeightSettled
-    // (fired at boot) and the resize/visualViewport listeners.
+    // (fired at boot) and the resize/visualViewport listeners. Once sized, also
+    // re-apply the upward-biased center for a saved location so it sits in the
+    // visible band rather than low behind the control panel. (These timers fire
+    // after DOMContentLoaded collapses the location controls, so the panel is
+    // already at its resting height.)
     [0, 150, 600, 1000].forEach((ms) =>
-      setTimeout(() => map && map.invalidateSize(), ms)
+      setTimeout(() => {
+        if (!map) return;
+        map.invalidateSize();
+        if (saved && !userPanned) centerOnLocation(saved.lat, saved.lon, false);
+      }, ms)
     );
     window.addEventListener("orientationchange", () => {
       setTimeout(() => map && map.invalidateSize(), 350);
@@ -234,6 +249,52 @@
 
   // --- Geolocation ---------------------------------------------------------
 
+  // Height of the upper safe-area inset (notch / status bar), in CSS px.
+  function safeAreaTop() {
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;pointer-events:none;" +
+      "padding-top:env(safe-area-inset-top,0px);";
+    document.body.appendChild(probe);
+    const v = parseFloat(getComputedStyle(probe).paddingTop) || 0;
+    probe.remove();
+    return v;
+  }
+
+  // Center the map on a point, biased upward so it lands in the visual center of
+  // the *unobscured* map — the band between the upper safe area and the top of
+  // the bottom control panel — rather than the container's geometric center,
+  // which sits ~10-15% too low, partly behind the panel. Collapse the location
+  // controls before calling so the panel is at its resting height.
+  // animate=true flies; false snaps.
+  function centerOnLocation(lat, lon, animate) {
+    if (!map) return;
+    const zoom = LOCATED_ZOOM;
+    const size = map.getSize();
+    if (!size || !size.y) {
+      map.setView([lat, lon], zoom);
+      return;
+    }
+    // The map fills the screen from (0,0), so screen/container coords coincide.
+    const controls = document.querySelector(".controls");
+    const controlsTop = controls
+      ? controls.getBoundingClientRect().top
+      : size.y;
+    const desiredY = (safeAreaTop() + controlsTop) / 2;
+    const offsetY = size.y / 2 - desiredY; // > 0 shifts the marker up
+    let center = [lat, lon];
+    if (Math.abs(offsetY) >= 1) {
+      // Shift the center point down (south) in pixel space so the actual
+      // location renders that many pixels higher, at desiredY.
+      center = map.unproject(
+        map.project([lat, lon], zoom).add([0, offsetY]),
+        zoom
+      );
+    }
+    if (animate) map.flyTo(center, zoom, { duration: 0.8 });
+    else map.setView(center, zoom);
+  }
+
   function locate() {
     if (!("geolocation" in navigator)) {
       setStatus("Location isn't available — enter a ZIP code instead.", true);
@@ -247,12 +308,12 @@
       (pos) => {
         els.locateBtn.disabled = false;
         const { latitude: lat, longitude: lon } = pos.coords;
-        map.flyTo([lat, lon], LOCATED_ZOOM, { duration: 0.8 });
         setMeMarker(lat, lon);
         saveLocation(lat, lon);
         loadWeather(lat, lon);
         setStatus("Centered on your location.");
         collapseLocationControls();
+        centerOnLocation(lat, lon, true);
       },
       (err) => {
         els.locateBtn.disabled = false;
@@ -330,13 +391,13 @@
         return;
       }
       const [lat, lon] = hit;
-      map.flyTo([lat, lon], LOCATED_ZOOM, { duration: 0.8 });
       setMeMarker(lat, lon);
       saveLocation(lat, lon);
       loadWeather(lat, lon);
       els.zipInput.blur();
       setStatus("Centered on ZIP " + zip + ".");
       collapseLocationControls();
+      centerOnLocation(lat, lon, true);
     } catch (_) {
       setStatus("Couldn't load ZIP data. Check your connection.", true);
     } finally {
