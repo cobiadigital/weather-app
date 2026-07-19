@@ -6,6 +6,8 @@
      proxied by this Worker at /api/nhc/current (Atlantic + East Pacific).
    - "Spaghetti" model tracks + the official (OFCL) forecast decoded from the
      NHC ATCF a-deck at /api/nhc/adeck?id=<stormId> (see src/index.js).
+   - Official cone, coastal wind watches/warnings, and TS-wind arrival contours
+     from NOAA's tropical MapServer via /api/nhc/gis.
 
    Vanilla JS, IIFE-wrapped, no dependencies — matches app.js conventions.
 ---------------------------------------------------------------------------- */
@@ -17,11 +19,28 @@
   const DEFAULT_VIEW = { lat: 22, lon: -72, zoom: 4 };
   const REFRESH_MS = 10 * 60 * 1000; // advisories update a few times a day
 
+  // Coastal wind watch/warning line colors (NHC interactive-graphic palette).
+  const WW_COLORS = {
+    HWR: "#ff2d2d", // hurricane warning
+    HWA: "#ff9ec8", // hurricane watch
+    TWR: "#3d8bfd", // tropical storm warning
+    TWA: "#ffdd33", // tropical storm watch
+  };
+  const WW_LABELS = {
+    HWR: "Hurricane Warning",
+    HWA: "Hurricane Watch",
+    TWR: "Tropical Storm Warning",
+    TWA: "Tropical Storm Watch",
+  };
+
   const els = {
     status: document.getElementById("status"),
     stormsBtn: document.getElementById("stormsBtn"),
     stormsBtnText: document.getElementById("stormsBtnText"),
     modelsBtn: document.getElementById("modelsBtn"),
+    coneBtn: document.getElementById("coneBtn"),
+    earliestBtn: document.getElementById("earliestBtn"),
+    likelyBtn: document.getElementById("likelyBtn"),
     refreshBtn: document.getElementById("refreshBtn"),
     stormSheet: document.getElementById("stormSheet"),
     stormList: document.getElementById("stormList"),
@@ -33,7 +52,16 @@
   let stormsLayer; // current-position markers
   let tracksLayer; // all model + official forecast lines
   let ptsLayer; // official forecast points (labeled dots)
+  let coneLayer; // NHC forecast cone polygons
+  let wwLayer; // coastal wind watches/warnings
+  let earliestLayer; // earliest-reasonable TS-wind arrival
+  let likelyLayer; // most-likely TS-wind arrival
   let showModels = true; // spaghetti visible by default
+  let showCone = true; // cone + wind WW visible by default
+  let showEarliest = false;
+  let showLikely = false;
+  let arrivalLoaded = { earliest: false, mostLikely: false };
+  let arrivalLoading = { earliest: false, mostLikely: false };
   let refreshTimer;
   let storms = []; // last-loaded storm list
 
@@ -57,9 +85,14 @@
       }
     ).addTo(map);
 
-    stormsLayer = L.layerGroup().addTo(map);
+    // GIS overlays under tracks so official/model lines stay readable on top.
+    coneLayer = L.layerGroup().addTo(map);
+    wwLayer = L.layerGroup().addTo(map);
+    earliestLayer = L.layerGroup();
+    likelyLayer = L.layerGroup();
     tracksLayer = L.layerGroup().addTo(map);
     ptsLayer = L.layerGroup().addTo(map);
+    stormsLayer = L.layerGroup().addTo(map);
 
     setTimeout(() => map.invalidateSize(), 0);
     window.addEventListener("orientationchange", () => {
@@ -99,9 +132,7 @@
       return;
     }
 
-    stormsLayer.clearLayers();
-    tracksLayer.clearLayers();
-    ptsLayer.clearLayers();
+    clearOverlayLayers();
 
     if (!storms.length) {
       renderEmpty();
@@ -142,11 +173,148 @@
       map.fitBounds(bounds, { padding: [60, 60], maxZoom: 6 });
     }
 
-    // Fetch model tracks for each storm in parallel; each extends the bounds.
-    await Promise.all(storms.map((s) => loadTracks(s, bounds)));
+    // Model tracks + official GIS overlays in parallel; each may extend bounds.
+    await Promise.all([
+      Promise.all(storms.map((s) => loadTracks(s, bounds))),
+      loadGis(bounds),
+    ]);
     if (bounds.isValid()) {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6 });
     }
+  }
+
+  function clearOverlayLayers() {
+    stormsLayer.clearLayers();
+    tracksLayer.clearLayers();
+    ptsLayer.clearLayers();
+    coneLayer.clearLayers();
+    wwLayer.clearLayers();
+    earliestLayer.clearLayers();
+    likelyLayer.clearLayers();
+    arrivalLoaded = { earliest: false, mostLikely: false };
+    arrivalLoading = { earliest: false, mostLikely: false };
+  }
+
+  // --- Official NHC GIS (cone / wind WW / arrival) via MapServer ------------
+
+  // Cone + wind WW load with storms (shown by default). Arrival contours are
+  // larger and lazy-loaded the first time their toggle is turned on.
+  async function loadGis(bounds) {
+    let data;
+    try {
+      const res = await fetch("/api/nhc/gis?layers=cone,watches");
+      if (!res.ok) return;
+      data = await res.json();
+    } catch (_) {
+      return; // overlays are nice-to-have; storms/tracks already rendered
+    }
+    if (!data) return;
+
+    addCone(data.cone, bounds);
+    addWatches(data.watches, bounds);
+    applyGisVisibility();
+  }
+
+  async function ensureArrival(kind) {
+    const key = kind === "earliest" ? "earliest" : "mostLikely";
+    const group = kind === "earliest" ? earliestLayer : likelyLayer;
+    if (arrivalLoaded[key] || arrivalLoading[key]) return;
+    arrivalLoading[key] = true;
+    try {
+      const res = await fetch("/api/nhc/gis?layers=" + encodeURIComponent(key));
+      if (!res.ok) return;
+      const data = await res.json();
+      group.clearLayers();
+      addArrival(data[key], group, null);
+      arrivalLoaded[key] = true;
+      applyGisVisibility();
+    } catch (_) {
+      // leave toggle on; user can refresh
+    } finally {
+      arrivalLoading[key] = false;
+    }
+  }
+
+  function addCone(fc, bounds) {
+    if (!fc || !fc.features || !fc.features.length) return;
+    L.geoJSON(fc, {
+      style: {
+        color: "#ffffff",
+        weight: 1.5,
+        opacity: 0.9,
+        fillColor: "#ffffff",
+        fillOpacity: 0.18,
+      },
+      onEachFeature: (feat, layer) => {
+        const p = feat.properties || {};
+        const name = [p.stormtype, p.stormname].filter(Boolean).join(" ") || "Storm";
+        const adv = p.advisnum != null ? "Adv #" + p.advisnum : "";
+        layer.bindTooltip(
+          "Cone · " + name + (adv ? " · " + adv : ""),
+          { sticky: true }
+        );
+        extendBoundsFromGeom(feat.geometry, bounds);
+      },
+    }).addTo(coneLayer);
+  }
+
+  function addWatches(fc, bounds) {
+    if (!fc || !fc.features || !fc.features.length) return;
+    L.geoJSON(fc, {
+      style: (feat) => {
+        const code = String((feat.properties || {}).tcww || "").toUpperCase();
+        return {
+          color: WW_COLORS[code] || "#ffffff",
+          weight: 5,
+          opacity: 0.95,
+          lineCap: "round",
+          lineJoin: "round",
+        };
+      },
+      onEachFeature: (feat, layer) => {
+        const p = feat.properties || {};
+        const code = String(p.tcww || "").toUpperCase();
+        const label = WW_LABELS[code] || "Watch/Warning";
+        const name = [p.stormtype, p.stormname].filter(Boolean).join(" ");
+        layer.bindTooltip(
+          label + (name ? " · " + name : ""),
+          { sticky: true }
+        );
+        extendBoundsFromGeom(feat.geometry, bounds);
+      },
+    }).addTo(wwLayer);
+  }
+
+  function addArrival(fc, group, bounds) {
+    if (!fc || !fc.features || !fc.features.length) return;
+    L.geoJSON(fc, {
+      style: {
+        color: "#ffcc66",
+        weight: 2,
+        opacity: 0.9,
+        dashArray: "6 4",
+      },
+      onEachFeature: (feat, layer) => {
+        const p = feat.properties || {};
+        const when = String(p.arrival_time || "").trim();
+        if (when) layer.bindTooltip(when, { sticky: true, permanent: false });
+        extendBoundsFromGeom(feat.geometry, bounds);
+      },
+    }).addTo(group);
+  }
+
+  function extendBoundsFromGeom(geom, bounds) {
+    if (!geom || !bounds) return;
+    const walk = (coords) => {
+      if (!coords || !coords.length) return;
+      if (typeof coords[0] === "number") {
+        const [lon, lat] = coords;
+        if (Number.isFinite(lat) && Number.isFinite(lon)) bounds.extend([lat, lon]);
+        return;
+      }
+      coords.forEach(walk);
+    };
+    walk(geom.coordinates);
   }
 
   // --- Load model guidance (a-deck GeoJSON) --------------------------------
@@ -341,6 +509,65 @@
     });
   }
 
+  function toggleCone() {
+    showCone = !showCone;
+    els.coneBtn.setAttribute("aria-pressed", showCone ? "true" : "false");
+    applyGisVisibility();
+    setStatus(
+      showCone
+        ? "Forecast cone and wind watches/warnings shown."
+        : "Cone and wind watches/warnings hidden."
+    );
+  }
+
+  function toggleEarliest() {
+    showEarliest = !showEarliest;
+    els.earliestBtn.setAttribute("aria-pressed", showEarliest ? "true" : "false");
+    applyGisVisibility();
+    if (showEarliest) {
+      setStatus("Loading earliest TS-wind arrival…");
+      ensureArrival("earliest").then(() => {
+        if (showEarliest) setStatus("Earliest reasonable TS-wind arrival shown.");
+      });
+    } else {
+      setStatus("Earliest wind arrival hidden.");
+    }
+  }
+
+  function toggleLikely() {
+    showLikely = !showLikely;
+    els.likelyBtn.setAttribute("aria-pressed", showLikely ? "true" : "false");
+    applyGisVisibility();
+    if (showLikely) {
+      setStatus("Loading most likely TS-wind arrival…");
+      ensureArrival("likely").then(() => {
+        if (showLikely) setStatus("Most likely TS-wind arrival shown.");
+      });
+    } else {
+      setStatus("Most likely wind arrival hidden.");
+    }
+  }
+
+  function applyGisVisibility() {
+    setGroupOnMap(coneLayer, showCone);
+    setGroupOnMap(wwLayer, showCone);
+    setGroupOnMap(earliestLayer, showEarliest);
+    setGroupOnMap(likelyLayer, showLikely);
+    // Re-adding overlays can stack above markers; keep interaction targets on top.
+    if (map.hasLayer(tracksLayer)) tracksLayer.bringToFront();
+    if (map.hasLayer(ptsLayer)) ptsLayer.bringToFront();
+    if (map.hasLayer(stormsLayer)) stormsLayer.bringToFront();
+  }
+
+  function setGroupOnMap(group, on) {
+    if (!map || !group) return;
+    if (on) {
+      if (!map.hasLayer(group)) group.addTo(map);
+    } else if (map.hasLayer(group)) {
+      map.removeLayer(group);
+    }
+  }
+
   function openSheet() {
     if (!storms.length) return;
     els.stormSheet.classList.remove("hidden");
@@ -439,6 +666,9 @@
     els.stormsBtn.addEventListener("click", openSheet);
     els.stormClose.addEventListener("click", closeSheet);
     els.modelsBtn.addEventListener("click", toggleModels);
+    els.coneBtn.addEventListener("click", toggleCone);
+    els.earliestBtn.addEventListener("click", toggleEarliest);
+    els.likelyBtn.addEventListener("click", toggleLikely);
     els.refreshBtn.addEventListener("click", () => loadStorms(true));
 
     document.addEventListener("visibilitychange", () => {
