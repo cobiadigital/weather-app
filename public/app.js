@@ -63,6 +63,9 @@
     playBtn: document.getElementById("playBtn"),
     loopScrub: document.getElementById("loopScrub"),
     loopTime: document.getElementById("loopTime"),
+    zipForm: document.getElementById("zipForm"),
+    zipInput: document.getElementById("zipInput"),
+    zipBtn: document.getElementById("zipBtn"),
   };
 
   let map;
@@ -81,6 +84,11 @@
 
   // Deferred PWA install prompt (Chrome/Android). Null on iOS Safari.
   let deferredInstallPrompt = null;
+
+  // ZIP -> [lat, lon] lookup table, lazily fetched on first use (it's ~0.9 MB,
+  // so we don't load it unless someone actually enters a ZIP).
+  let zipData = null;
+  let zipLoading = null;
 
   // --- Map setup -----------------------------------------------------------
 
@@ -148,7 +156,8 @@
 
   function locate() {
     if (!("geolocation" in navigator)) {
-      setStatus("Location isn't available on this device.", true);
+      setStatus("Location isn't available — enter a ZIP code instead.", true);
+      els.zipInput.focus();
       return;
     }
     setStatus("Finding your location…");
@@ -166,14 +175,70 @@
       },
       (err) => {
         els.locateBtn.disabled = false;
+        // Location off or denied — fall back to manual ZIP entry.
         const msg =
           err.code === err.PERMISSION_DENIED
-            ? "Location permission denied. Enable it in Settings › Safari."
-            : "Couldn't get your location.";
+            ? "Location off. Enter a ZIP code, or enable location in Settings."
+            : "Couldn't get your location — enter a ZIP code instead.";
         setStatus(msg, true);
+        els.zipInput.focus();
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
+  }
+
+  // --- ZIP-code fallback ---------------------------------------------------
+
+  // Fetch the ZIP table once and memoize it (also de-dupes concurrent calls).
+  function loadZipData() {
+    if (zipData) return Promise.resolve(zipData);
+    if (!zipLoading) {
+      zipLoading = fetch("/zipcodes.json")
+        .then((res) => {
+          if (!res.ok) throw new Error("zipcodes " + res.status);
+          return res.json();
+        })
+        .then((data) => {
+          zipData = data;
+          return data;
+        })
+        .catch((err) => {
+          zipLoading = null; // allow a retry on the next attempt
+          throw err;
+        });
+    }
+    return zipLoading;
+  }
+
+  async function goToZip() {
+    const zip = (els.zipInput.value || "").trim();
+    if (!/^\d{5}$/.test(zip)) {
+      setStatus("Enter a 5-digit US ZIP code.", true);
+      els.zipInput.focus();
+      return;
+    }
+
+    setStatus("Looking up ZIP " + zip + "…");
+    els.zipBtn.disabled = true;
+    try {
+      const data = await loadZipData();
+      const hit = data[zip];
+      if (!hit) {
+        setStatus("ZIP " + zip + " not found.", true);
+        return;
+      }
+      const [lat, lon] = hit;
+      map.flyTo([lat, lon], LOCATED_ZOOM, { duration: 0.8 });
+      setMeMarker(lat, lon);
+      saveLocation(lat, lon);
+      loadWeather(lat, lon);
+      els.zipInput.blur();
+      setStatus("Centered on ZIP " + zip + ".");
+    } catch (_) {
+      setStatus("Couldn't load ZIP data. Check your connection.", true);
+    } finally {
+      els.zipBtn.disabled = false;
+    }
   }
 
   function setMeMarker(lat, lon) {
@@ -549,6 +614,10 @@
     els.alertClose.addEventListener("click", closeSheet);
     els.cloudsBtn.addEventListener("click", toggleClouds);
     els.loopBtn.addEventListener("click", toggleLoop);
+    els.zipForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      goToZip();
+    });
     els.playBtn.addEventListener("click", togglePlay);
     els.loopScrub.addEventListener("input", onScrub);
     els.installBtn.addEventListener("click", onInstall);

@@ -70,7 +70,7 @@ button,
 
 /* Leaflet's default attribution is tiny; nudge it above the home indicator. */
 .leaflet-bottom.leaflet-right {
-  margin-bottom: calc(env(safe-area-inset-bottom, 0px) + 214px);
+  margin-bottom: calc(env(safe-area-inset-bottom, 0px) + 268px);
 }
 .leaflet-control-attribution {
   font-size: 10px;
@@ -231,6 +231,41 @@ button,
 }
 .btn.toggle[aria-pressed="true"]:active {
   background: var(--accent-press);
+}
+
+/* --- ZIP fallback input --------------------------------------------------- */
+
+.zip-row {
+  gap: 10px;
+}
+.zip-input {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 16px; /* ≥16px keeps iOS Safari from zooming on focus */
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+}
+.zip-input::placeholder {
+  color: var(--muted);
+  letter-spacing: normal;
+}
+.zip-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.1);
+}
+.btn.zip-go {
+  flex: none;
+  min-height: 44px;
+  padding: 0 18px;
 }
 
 /* --- Radar loop timeline -------------------------------------------------- */

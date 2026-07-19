@@ -39,6 +39,12 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   `goes-wv-4km-900913`).
 - **Alerts / conditions** — the NWS API (`api.weather.gov`), always reached via
   the Worker proxy at `/api/nws/...`, never called directly from the browser.
+- **ZIP centroids (location fallback)** — `public/zipcodes.json`, a static
+  `{ "zip": [lat, lon] }` table (~34k US ZIPs, 4-decimal coords). `app.js`
+  fetches it lazily (only when a ZIP is entered) and memoizes it, so the ~0.9 MB
+  file never loads unless used. It's how the app recenters when geolocation is
+  off/denied. Regenerate from the MIT-licensed `us-zips` npm dataset (US Census
+  ZCTA centroids) if it needs refreshing.
 
 ## PWA / install
 
