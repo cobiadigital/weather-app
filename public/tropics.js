@@ -36,7 +36,7 @@
   const els = {
     status: document.getElementById("status"),
     stormsBtn: document.getElementById("stormsBtn"),
-    stormsBtnText: document.getElementById("stormsBtnText"),
+    stormsBadge: document.getElementById("stormsBadge"),
     modelsBtn: document.getElementById("modelsBtn"),
     coneBtn: document.getElementById("coneBtn"),
     refreshBtn: document.getElementById("refreshBtn"),
@@ -133,7 +133,7 @@
         hasFramedView = true;
       }
       setStatus("No active tropical cyclones.");
-      els.stormsBtnText.textContent = "Storms";
+      setStormCount(0);
       return;
     }
 
@@ -158,8 +158,7 @@
     });
 
     renderStormList();
-    els.stormsBtnText.textContent =
-      storms.length + " storm" + (storms.length > 1 ? "s" : "");
+    setStormCount(storms.length);
     setStatus(
       "Showing " + storms.length + " active storm" + (storms.length > 1 ? "s" : "") + "."
     );
@@ -509,6 +508,16 @@
   function setStatus(msg, isError) {
     els.status.textContent = msg;
     els.status.classList.toggle("error", !!isError);
+  }
+
+  // Red iOS-style badge on the Storms button; hidden when count is 0.
+  function setStormCount(n) {
+    const count = Math.max(0, Number(n) || 0);
+    const label = count === 1 ? "1 storm" : count + " storms";
+    els.stormsBtn.setAttribute("aria-label", "Storms, " + label);
+    if (!els.stormsBadge) return;
+    els.stormsBadge.dataset.count = String(count);
+    els.stormsBadge.textContent = count > 99 ? "99+" : count ? String(count) : "";
   }
 
   function ktToMph(kt) {
