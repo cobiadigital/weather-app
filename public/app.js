@@ -33,6 +33,8 @@
   const LOCATED_ZOOM = 9;
   const REFRESH_MS = 5 * 60 * 1000; // auto-refresh radar every 5 minutes
   const STORE_KEY = "radar.lastLocation";
+  const SHARE_URL = "https://bendar.app";
+  const SHARE_TEXT = "Live weather radar — " + SHARE_URL;
 
   // Radar loop: 2 hours of frames at 10-minute spacing (12 frames), advanced
   // roughly twice a second. IEM composites lag real time by a few minutes, so
@@ -810,6 +812,11 @@
   // Render the on-screen map to a PNG and hand it to the native share sheet as
   // a file (Web Share API Level 2), so people can send it like a photo. Falls
   // back to a plain download where file-sharing isn't supported (most desktops).
+  //
+  // Share files + title + text (same shape that already delivered both image and
+  // caption on iOS). Put the site in `text` as a full https:// URL so targets
+  // can make it tappable — but do not also set `url`, which iOS often treats as
+  // a link-only share and drops the attachment for.
   async function shareView() {
     if (!map) return;
     els.shareBtn.disabled = true;
@@ -828,7 +835,7 @@
     const data = {
       files: [file],
       title: "Bendar.app radar",
-      text: "Live weather radar — https://bendar.app",
+      text: SHARE_TEXT,
     };
 
     try {
