@@ -42,14 +42,24 @@
         <span class="dot" aria-hidden="true"></span>
         Local Radar
       </div>
-      <button
-        id="alertPill"
-        class="alert-pill hidden"
-        type="button"
-        aria-expanded="false"
-      >
-        <span id="alertPillText">Alerts</span>
-      </button>
+      <div class="top-actions">
+        <button
+          id="locPinBtn"
+          class="pin-btn hidden"
+          type="button"
+          aria-label="Change location"
+        >
+          <span aria-hidden="true">◎</span>
+        </button>
+        <button
+          id="alertPill"
+          class="alert-pill hidden"
+          type="button"
+          aria-expanded="false"
+        >
+          <span id="alertPillText">Alerts</span>
+        </button>
+      </div>
     </header>
 
     <!-- Slide-up alert details -->
@@ -64,7 +74,7 @@
 
     <!-- Bottom control bar -->
     <footer class="controls">
-      <div class="control-row">
+      <div id="locateRow" class="control-row">
         <button id="locateBtn" class="btn primary" type="button">
           <span class="btn-ico" aria-hidden="true">◎</span>
           <span>My location</span>
