@@ -99,15 +99,39 @@
 
   // --- Viewport height -----------------------------------------------------
 
-  // iOS home-screen (standalone) / fullscreen apps have a long-standing WebKit
-  // bug: the viewport that `position:fixed` + `100vh`/`100dvh` resolve against
-  // renders shorter than the real screen on first paint, leaving a blank strip
-  // (~150px) along the bottom — the dark map stops short and the control bar
-  // floats too high. `window.innerHeight`, read from JS, reports the true usable
-  // height, so we publish it as `--vh` and drive the full-screen surfaces off it
-  // (see #map / body in styles.css). Re-measure whenever the height can change.
+  // Publish the true full-screen height as --vh, which #map / body size to (see
+  // styles.css). The measurement differs by mode:
+  //
+  //  - iOS home-screen (standalone) app: the web view covers the whole screen
+  //    (content starts at physical y=0), but window.innerHeight comes back short
+  //    by the top safe-area — the status bar / Dynamic Island — e.g. 812 on an
+  //    874px screen. Sizing to innerHeight then leaves that ~60px as a blank
+  //    strip along the bottom and floats the controls up. screen.height is the
+  //    true drawable height here; the app is portrait-locked so it's stable.
+  //  - Safari (and everything else): innerHeight is correct — the difference
+  //    from screen.height there is the real browser toolbars, which we must not
+  //    draw under. So we keep innerHeight.
+  //
+  // Re-measure whenever the height can change (see the listeners below).
+  function isStandalone() {
+    return (
+      (window.matchMedia &&
+        window.matchMedia("(display-mode: standalone)").matches) ||
+      window.navigator.standalone === true
+    );
+  }
+  function measuredViewportHeight() {
+    if (isStandalone() && window.screen && screen.height) {
+      // Guard with max so we never end up shorter than innerHeight.
+      return Math.max(window.innerHeight, screen.height);
+    }
+    return window.innerHeight;
+  }
   function setViewportHeight() {
-    document.documentElement.style.setProperty("--vh", window.innerHeight + "px");
+    document.documentElement.style.setProperty(
+      "--vh",
+      measuredViewportHeight() + "px"
+    );
   }
 
   // iOS standalone reports its final innerHeight a beat late: the value on first
@@ -172,40 +196,52 @@
     document.body.appendChild(probe);
 
     const box = document.createElement("pre");
+    // Pad the top past the status bar / Dynamic Island so the first lines aren't
+    // hidden, and make it tappable to copy (pointer-events:auto).
     box.style.cssText =
-      "position:fixed;top:0;left:0;z-index:9999;margin:0;padding:8px 10px;" +
+      "position:fixed;top:0;left:0;z-index:9999;margin:0;" +
+      "padding:calc(env(safe-area-inset-top, 0px) + 8px) 10px 8px;" +
       "max-width:100vw;font:11px/1.35 ui-monospace,Menlo,monospace;" +
       "color:#0f0;background:rgba(0,0,0,.72);white-space:pre;" +
-      "pointer-events:none;text-shadow:0 1px 2px #000;";
+      "pointer-events:auto;text-shadow:0 1px 2px #000;";
     document.body.appendChild(box);
 
     const px = (v) => Math.round(v) + "px";
+    let lastText = "";
     function render() {
       const cs = getComputedStyle(probe);
       const de = document.documentElement;
       const controls = document.querySelector(".controls");
       const cRect = controls && controls.getBoundingClientRect();
-      const standalone =
-        (window.matchMedia &&
-          window.matchMedia("(display-mode: standalone)").matches) ||
-        window.navigator.standalone === true;
-      box.textContent =
-        "standalone: " + standalone + "\n" +
+      lastText =
+        "standalone: " + isStandalone() + "\n" +
         "innerHeight: " + px(window.innerHeight) + "\n" +
         "doc.clientH: " + px(de.clientHeight) + "\n" +
         "visualVP.h : " +
         (window.visualViewport ? px(window.visualViewport.height) : "n/a") +
         "\n" +
         "screen.h/av: " + px(screen.height) + " / " + px(screen.availHeight) + "\n" +
-        "--vh set to: " + (de.style.getPropertyValue("--vh") || "(unset)") + "\n" +
+        "measured→vh: " + px(measuredViewportHeight()) +
+        " (--vh " + (de.style.getPropertyValue("--vh") || "unset") + ")\n" +
         "safe T/R/B/L: " +
         cs.paddingTop + " / " + cs.paddingRight + " / " +
         cs.paddingBottom + " / " + cs.paddingLeft + "\n" +
         "controls.bottom: " + (cRect ? px(cRect.bottom) : "n/a") +
-        "  gap-to-inner: " +
-        (cRect ? px(window.innerHeight - cRect.bottom) : "n/a") + "\n" +
-        "dpr: " + window.devicePixelRatio;
+        " / screen " + px(screen.height) + "\n" +
+        "dpr: " + window.devicePixelRatio + "  —  tap to copy";
+      box.textContent = lastText;
     }
+    box.addEventListener("click", () => {
+      const done = () => {
+        box.textContent = "copied!";
+        setTimeout(render, 700);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(lastText).then(done, done);
+      } else {
+        done();
+      }
+    });
     render();
     window.addEventListener("resize", render);
     if (window.visualViewport)
