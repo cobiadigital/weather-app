@@ -68,9 +68,18 @@ button,
   z-index: 0;
 }
 
-/* Leaflet's default attribution is tiny; nudge it above the home indicator. */
+/* Attribution sits at the very bottom of the screen, below the control panel
+   (the panel is lifted to leave room for it just above the home indicator). */
 .leaflet-bottom.leaflet-right {
-  margin-bottom: calc(env(safe-area-inset-bottom, 0px) + 268px);
+  left: 0;
+  right: 0;
+  margin-bottom: calc(env(safe-area-inset-bottom, 0px) + 4px);
+  display: flex;
+  justify-content: center;
+}
+.leaflet-right .leaflet-control {
+  float: none;
+  margin: 0;
 }
 .leaflet-control-attribution {
   font-size: 10px;
@@ -176,7 +185,8 @@ button,
   position: fixed;
   left: 12px;
   right: 12px;
-  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  /* Lifted to leave room for the map attribution line beneath the panel. */
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 28px);
   z-index: 500;
   display: flex;
   flex-direction: column;
