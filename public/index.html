@@ -74,6 +74,24 @@
         </button>
       </div>
 
+      <!-- ZIP fallback: works when location services are off/denied -->
+      <form id="zipForm" class="control-row zip-row">
+        <label for="zipInput" class="slider-label">ZIP</label>
+        <input
+          id="zipInput"
+          class="zip-input"
+          type="text"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          maxlength="5"
+          autocomplete="postal-code"
+          enterkeyhint="go"
+          placeholder="e.g. 10001"
+          aria-label="ZIP code"
+        />
+        <button id="zipBtn" class="btn zip-go" type="submit">Go</button>
+      </form>
+
       <!-- Layer + mode toggles -->
       <div class="control-row toggles">
         <button

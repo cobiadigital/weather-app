@@ -17,6 +17,8 @@ All data is public and comes from the **National Weather Service**:
 
 - Full-screen dark map with a live radar overlay
 - **My location** button (uses your device GPS) and remembers your last spot
+- **ZIP-code fallback** for when location services are off — an offline lookup
+  table (`public/zipcodes.json`) maps the ZIP to a lat/lon and recenters the map
 - Radar **opacity slider** and manual **refresh**; radar auto-refreshes every 5 min
 - **Loop 4h** — animate the last 4 hours of radar with a play/pause + scrubber
   and a timestamp, so you can see where the weather is heading
@@ -37,6 +39,10 @@ All data is public and comes from the **National Weather Service**:
   separate *satellite* product (it shows cloud cover, not precipitation); the
   NEXRAD radar product does not include cloud coverage.
 - **Alerts** — the NWS API, proxied through the Worker (see below).
+- **ZIP centroids** — `public/zipcodes.json`, a compact `{ "zip": [lat, lon] }`
+  table (~34k US ZIPs, coords rounded to 4 decimals, lazily fetched only when a
+  ZIP is entered). Derived from the US Census Bureau's ZCTA centroids via the
+  MIT-licensed [`us-zips`](https://www.npmjs.com/package/us-zips) dataset.
 
 ## Project layout
 
