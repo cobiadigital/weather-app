@@ -27,10 +27,10 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
 - **Radar tiles (live)** — Iowa Environmental Mesonet NEXRAD N0Q composite:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png`
   (standard web-mercator `{z}/{x}/{y}` tiles; refreshes ~every 5 min).
-- **Radar loop (last 4 h)** — IEM's time-enabled NEXRAD WMS
+- **Radar loop (last 2 h)** — IEM's time-enabled NEXRAD WMS
   `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
   `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
-  `app.js` preloads one `L.tileLayer.wms` per 5-minute frame (48 layers, all
+  `app.js` preloads one `L.tileLayer.wms` per 10-minute frame (12 layers, all
   added at opacity 0) and animates by toggling opacity between already-loaded
   layers, so frames don't flash blank while tiles load. It's a different
   endpoint than the live tile cache above.

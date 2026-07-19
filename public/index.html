@@ -74,8 +74,8 @@
         </button>
       </div>
 
-      <!-- ZIP fallback: works when location services are off/denied -->
-      <form id="zipForm" class="control-row zip-row">
+      <!-- ZIP fallback: hidden until the "My location" button fails -->
+      <form id="zipForm" class="control-row zip-row hidden">
         <label for="zipInput" class="slider-label">ZIP</label>
         <input
           id="zipInput"
@@ -110,7 +110,7 @@
           aria-pressed="false"
         >
           <span class="btn-ico" aria-hidden="true">◷</span>
-          <span>Loop 4h</span>
+          <span>Loop 2h</span>
         </button>
         <button
           id="installBtn"
@@ -144,8 +144,8 @@
           class="slider"
           type="range"
           min="0"
-          max="47"
-          value="47"
+          max="11"
+          value="11"
           aria-label="Radar loop time"
         />
         <span id="loopTime" class="slider-val loop-time">--:--</span>

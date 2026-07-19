@@ -34,12 +34,12 @@
   const REFRESH_MS = 5 * 60 * 1000; // auto-refresh radar every 5 minutes
   const STORE_KEY = "radar.lastLocation";
 
-  // Radar loop: 4 hours of frames at 5-minute spacing (48 frames), advanced
+  // Radar loop: 2 hours of frames at 10-minute spacing (12 frames), advanced
   // roughly twice a second. IEM composites lag real time by a few minutes, so
   // we end the loop one step back from "now" to avoid requesting a blank frame.
-  const LOOP_HOURS = 4;
-  const LOOP_STEP_MIN = 5;
-  const LOOP_FRAME_COUNT = (LOOP_HOURS * 60) / LOOP_STEP_MIN; // 48
+  const LOOP_HOURS = 2;
+  const LOOP_STEP_MIN = 10;
+  const LOOP_FRAME_COUNT = (LOOP_HOURS * 60) / LOOP_STEP_MIN; // 12
   const LOOP_LAG_MIN = 5;
   const LOOP_PLAY_MS = 500; // ms per frame while playing
   const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
@@ -162,7 +162,7 @@
   function locate() {
     if (!("geolocation" in navigator)) {
       setStatus("Location isn't available — enter a ZIP code instead.", true);
-      els.zipInput.focus();
+      revealZip();
       return;
     }
     setStatus("Finding your location…");
@@ -180,16 +180,23 @@
       },
       (err) => {
         els.locateBtn.disabled = false;
-        // Location off or denied — fall back to manual ZIP entry.
+        // Location off or denied — reveal the manual ZIP fallback.
         const msg =
           err.code === err.PERMISSION_DENIED
             ? "Location off. Enter a ZIP code, or enable location in Settings."
             : "Couldn't get your location — enter a ZIP code instead.";
         setStatus(msg, true);
-        els.zipInput.focus();
+        revealZip();
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
+  }
+
+  // The ZIP fallback stays hidden until geolocation fails; then we show it and
+  // focus the field so the user can type a ZIP right away.
+  function revealZip() {
+    els.zipForm.classList.remove("hidden");
+    els.zipInput.focus();
   }
 
   // --- ZIP-code fallback ---------------------------------------------------
@@ -513,8 +520,8 @@
     setStatus("Showing live radar.");
   }
 
-  // Build 48 frame timestamps at 5-minute spacing, ending one lag-step back
-  // from now (snapped down to the 5-minute grid the composites are built on).
+  // Build 12 frame timestamps at 10-minute spacing, ending one lag-step back
+  // from now (snapped down to the 10-minute grid the composites are built on).
   function buildLoopFrames() {
     const now = Date.now();
     const step = LOOP_STEP_MIN * 60 * 1000;

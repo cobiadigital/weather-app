@@ -20,7 +20,7 @@ All data is public and comes from the **National Weather Service**:
 - **ZIP-code fallback** for when location services are off — an offline lookup
   table (`public/zipcodes.json`) maps the ZIP to a lat/lon and recenters the map
 - Radar **opacity slider** and manual **refresh**; radar auto-refreshes every 5 min
-- **Loop 4h** — animate the last 4 hours of radar with a play/pause + scrubber
+- **Loop 2h** — animate the last 2 hours of radar with a play/pause + scrubber
   and a timestamp, so you can see where the weather is heading
 - **Clouds** — optional GOES satellite (infrared) cloud-cover overlay
 - **Install** — add it to your home screen as a full-screen app (a native
@@ -34,7 +34,7 @@ All data is public and comes from the **National Weather Service**:
 - **Radar (live + loop)** — NEXRAD N0Q base-reflectivity composite from the
   [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/). The live
   view uses IEM's current tile cache; the loop uses IEM's time-enabled NEXRAD
-  WMS (`n0q-t.cgi`, 5-minute archive) to fetch each of the past 48 frames.
+  WMS (`n0q-t.cgi`) to preload the past 12 frames (10-minute spacing).
 - **Clouds** — GOES East infrared satellite composite, also from IEM. This is a
   separate *satellite* product (it shows cloud cover, not precipitation); the
   NEXRAD radar product does not include cloud coverage.
