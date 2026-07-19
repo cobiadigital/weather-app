@@ -18,8 +18,19 @@ const NWS_BASE = "https://api.weather.gov";
 //  - ATCF "a-deck" (aid_public): per-storm model guidance, one gzip'd text file
 //    per storm holding every forecast aid (GFS, ECMWF, HWRF, the OFCL official
 //    forecast, consensus aids, …) — i.e. the "spaghetti" model tracks.
+//  - NOAA tropical MapServer: official cone, coastal wind watches/warnings, and
+//    tropical-storm-force wind arrival contours as queryable GeoJSON (no KMZ).
 const NHC_CURRENT_URL = "https://www.nhc.noaa.gov/CurrentStorms.json";
 const NHC_ADECK_BASE = "https://ftp.nhc.noaa.gov/atcf/aid_public/";
+const NHC_MAPSERVER =
+  "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer";
+// Layer ids on NHC_tropical_weather_summary (see MapServer?f=pjson).
+const NHC_GIS_LAYERS = {
+  cone: 7,
+  watches: 8,
+  earliest: 18,
+  mostLikely: 19,
+};
 
 // NWS/NHC request a User-Agent that identifies the app and a contact. Update the
 // contact if you fork this. See https://www.weather.gov/documentation/services-web-api
@@ -101,6 +112,7 @@ async function handleNHC(request, url) {
   const sub = url.pathname.slice("/api/nhc/".length);
   if (sub === "current") return nhcCurrent();
   if (sub === "adeck") return nhcAdeck(url.searchParams.get("id"));
+  if (sub === "gis") return nhcGis(url.searchParams.get("layers"));
   return json({ error: "Not found" }, 404);
 }
 
@@ -129,6 +141,107 @@ async function nhcCurrent() {
     return id.startsWith("al") || id.startsWith("ep");
   });
   return json({ activeStorms: storms }, 200, 60);
+}
+
+// Official NHC GIS overlays (cone, wind watches/warnings, TS-wind arrival times)
+// from the NOAA tropical MapServer, returned as GeoJSON FeatureCollections so
+// the browser needs no KMZ/KML parser. Filtered to Atlantic + East Pacific.
+// Optional ?layers=cone,watches,earliest,mostLikely (default: all). Failures
+// degrade to empty collections — tracks/markers still render.
+async function nhcGis(rawLayers) {
+  const empty = () => ({ type: "FeatureCollection", features: [] });
+  const requested = parseGisLayers(rawLayers);
+  const results = await Promise.all(
+    requested.map(async (key) => {
+      try {
+        return await fetchMapServerLayer(NHC_GIS_LAYERS[key]);
+      } catch (_) {
+        return empty();
+      }
+    })
+  );
+
+  const out = {};
+  requested.forEach((key, i) => {
+    out[key] = filterAtlanticEastPacific(results[i], key);
+  });
+  return json(out, 200, 300);
+}
+
+function parseGisLayers(raw) {
+  const all = Object.keys(NHC_GIS_LAYERS);
+  if (!raw) return all;
+  const wanted = String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter((k) => NHC_GIS_LAYERS[k] != null);
+  return wanted.length ? wanted : all;
+}
+
+async function fetchMapServerLayer(layerId) {
+  const params = new URLSearchParams({
+    where: "1=1",
+    outFields: "*",
+    returnGeometry: "true",
+    outSR: "4326",
+    f: "geojson",
+  });
+  const upstream = await fetch(
+    `${NHC_MAPSERVER}/${layerId}/query?${params}`,
+    {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/geo+json,application/json" },
+      cf: { cacheTtl: 300, cacheEverything: true },
+    }
+  );
+  if (!upstream.ok) {
+    return { type: "FeatureCollection", features: [] };
+  }
+  const data = await upstream.json();
+  if (!data || data.type !== "FeatureCollection" || !Array.isArray(data.features)) {
+    return { type: "FeatureCollection", features: [] };
+  }
+  // Drop bulky MapServer bookkeeping fields the client never uses.
+  data.features = data.features.map(slimGisFeature);
+  return data;
+}
+
+function slimGisFeature(feat) {
+  const p = feat.properties || {};
+  const keep = {};
+  for (const k of [
+    "stormname",
+    "stormtype",
+    "basin",
+    "advdate",
+    "advisnum",
+    "fcstprd",
+    "stormnum",
+    "tcww",
+    "arrival_time",
+    "folderpath",
+  ]) {
+    if (p[k] != null && p[k] !== "") keep[k] = p[k];
+  }
+  return {
+    type: "Feature",
+    geometry: feat.geometry,
+    properties: keep,
+  };
+}
+
+// Cone / wind-WW features carry basin; arrival contours encode the ATCF id in
+// folderpath (e.g. "…: AL022026_Adv2"). Keep only Atlantic + East Pacific.
+function filterAtlanticEastPacific(fc, key) {
+  const features = (fc.features || []).filter((f) => {
+    const p = f.properties || {};
+    if (key === "earliest" || key === "mostLikely") {
+      const path = String(p.folderpath || "");
+      return /:\s*(AL|EP)\d{6}/i.test(path);
+    }
+    const basin = String(p.basin || "").toUpperCase();
+    return basin === "AL" || basin === "EP";
+  });
+  return { type: "FeatureCollection", features };
 }
 
 // Model guidance for one storm, decoded from the gzip'd ATCF a-deck and returned
