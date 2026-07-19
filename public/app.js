@@ -110,15 +110,29 @@
     document.documentElement.style.setProperty("--vh", window.innerHeight + "px");
   }
 
+  // iOS standalone reports its final innerHeight a beat late: the value on first
+  // paint can be short, and no single event reliably marks "settled." So besides
+  // the live listeners we re-measure a few times over the first second.
+  function setViewportHeightSettled() {
+    setViewportHeight();
+    [50, 150, 300, 600, 1000].forEach((ms) =>
+      setTimeout(setViewportHeight, ms)
+    );
+  }
+
   window.addEventListener("resize", setViewportHeight);
   window.addEventListener("orientationchange", () => {
     // Safari reports the pre-rotation height synchronously; re-measure after it
     // settles so the map/controls snap to the new bottom edge.
-    setTimeout(setViewportHeight, 300);
+    setViewportHeightSettled();
   });
   // A restored-from-bfcache page (Safari back/forward) can come back with a
   // stale height; re-measure on show.
   window.addEventListener("pageshow", setViewportHeight);
+  // visualViewport tracks the real drawable area and fires when it settles.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", setViewportHeight);
+  }
 
   // --- Map setup -----------------------------------------------------------
 
@@ -161,19 +175,16 @@
     setStatus("Radar loaded.");
     scheduleRefresh();
 
-    // The map is sized to var(--vh) (measured innerHeight). The real height in
-    // an iOS standalone/fullscreen app can settle a frame or two late, so
-    // re-measure and re-layout Leaflet once after load and on rotation, so the
-    // map fills the full area and loads tiles for it.
-    setTimeout(() => {
-      setViewportHeight();
-      map.invalidateSize();
-    }, 0);
+    // The map fills body, which is sized to var(--vh) (measured innerHeight).
+    // The real height in an iOS standalone/web-app can settle late, so as the
+    // measured height converges, keep Leaflet's canvas in sync so it loads tiles
+    // for the full area. --vh itself is re-measured by setViewportHeightSettled
+    // (fired at boot) and the resize/visualViewport listeners.
+    [0, 150, 600, 1000].forEach((ms) =>
+      setTimeout(() => map && map.invalidateSize(), ms)
+    );
     window.addEventListener("orientationchange", () => {
-      setTimeout(() => {
-        setViewportHeight();
-        map && map.invalidateSize();
-      }, 300);
+      setTimeout(() => map && map.invalidateSize(), 350);
     });
   }
 
@@ -779,7 +790,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    setViewportHeight();
+    setViewportHeightSettled();
     initMap();
     bind();
     // Auto-request location on first load if we don't have a saved spot;

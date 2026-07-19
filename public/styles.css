@@ -51,6 +51,13 @@ body {
 body {
   position: fixed;
   inset: 0;
+  /* height wins over the over-constrained inset:0, so body is exactly the
+     measured screen height and becomes the positioning context for the overlay
+     UI below (which is position:absolute, not fixed). Anchoring that UI to body
+     instead of the fixed viewport is what keeps the control bar + copyright on
+     the true bottom edge in iOS standalone/web-app mode, where the fixed
+     viewport is shorter than the real screen. */
+  height: var(--vh, 100dvh);
   overflow: hidden;
 }
 
@@ -65,18 +72,12 @@ button,
 /* --- Map ------------------------------------------------------------------ */
 
 #map {
-  position: fixed;
-  /* inset:0 pins the map to all four edges. On iOS home-screen (standalone) /
-     fullscreen apps the fixed viewport that inset:0 (and 100vh/100dvh) resolve
-     against renders shorter than the real screen on first paint, so the map
-     stops ~150px short and a blank strip shows along the bottom. --vh is set
-     from window.innerHeight in app.js (the true usable height); pinning the
-     height to it overrides that short viewport and fills the screen. The var
-     falls back to 100dvh/100vh before the script runs (or if it never does). */
+  /* absolute (not fixed) so it fills body — which is the measured screen
+     height (var(--vh)) — rather than the iOS fixed viewport, which renders
+     shorter than the real screen in standalone/web-app mode and left a blank
+     strip along the bottom. inset:0 fills body edge-to-edge. */
+  position: absolute;
   inset: 0;
-  height: 100vh;
-  height: 100dvh;
-  height: var(--vh, 100dvh);
   background: #0b1220;
   z-index: 0;
 }
@@ -106,7 +107,9 @@ button,
 /* --- Top bar -------------------------------------------------------------- */
 
 .topbar {
-  position: fixed;
+  /* absolute so it anchors to body (the measured full-height box), matching
+     the map and bottom controls. See the #map / body notes above. */
+  position: absolute;
   top: 0;
   left: 0;
   right: 0;
@@ -195,7 +198,10 @@ button,
 /* --- Bottom controls ------------------------------------------------------ */
 
 .controls {
-  position: fixed;
+  /* absolute → anchored to body's true bottom (var(--vh)), not the short iOS
+     fixed viewport, so the panel sits just above the home indicator instead of
+     floating up with dead space beneath it. */
+  position: absolute;
   left: 12px;
   right: 12px;
   /* Lifted to leave room for the map attribution line beneath the panel. */
@@ -400,7 +406,8 @@ button,
 /* --- Alert sheet ---------------------------------------------------------- */
 
 .sheet {
-  position: fixed;
+  /* absolute → pinned to body's true bottom, in step with the controls. */
+  position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
