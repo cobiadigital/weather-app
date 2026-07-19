@@ -125,13 +125,17 @@
       .storm-popup .links { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; }
       .storm-popup .links a { color: #0a58ca; font-weight: 600; }
 
-      /* iOS-style count badge on the Storms button. */
+      /* iOS-style count badge pinned to the Storms button's top-right corner. */
       #stormsBtn {
         position: relative;
-        gap: 8px;
+        overflow: visible;
       }
       #stormsBtn .storm-badge {
         display: none;
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        z-index: 1;
         min-width: 18px;
         height: 18px;
         padding: 0 5px;
@@ -144,6 +148,7 @@
         text-align: center;
         letter-spacing: -0.02em;
         box-shadow: 0 0 0 1.5px rgba(11, 18, 32, 0.35);
+        pointer-events: none;
       }
       #stormsBtn .storm-badge[data-count]:not([data-count="0"]):not([data-count=""]) {
         display: inline-block;
