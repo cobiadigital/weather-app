@@ -10,7 +10,8 @@
      MapServer via /api/nhc/gis (GeoJSON).
    - Arrival-time, probabilistic-wind, and inundation products from the same
      MapServer as viewport export PNGs (official symbology + labels; inundation
-     is a raster mosaic so GeoJSON isn't an option).
+     is a raster mosaic so GeoJSON isn't an option). Arrival uses its own overlay
+     with CSS invert so the black contours read on the dark basemap.
 
    Vanilla JS, IIFE-wrapped, no dependencies — matches app.js conventions.
 ---------------------------------------------------------------------------- */
@@ -72,7 +73,10 @@
   let ptsLayer; // official forecast points (labeled dots)
   let coneLayer; // NHC forecast cone polygons
   let wwLayer; // coastal wind watches/warnings
-  let hazardOverlay = null; // L.imageOverlay for MapServer /export hazards
+  // Separate export overlays: arrival is inverted (black → white); color
+  // products (prob. winds / inundation) must not be inverted.
+  let arrivalOverlay = null;
+  let colorHazardOverlay = null;
   let showModels = true; // spaghetti visible by default
   let showCone = true; // cone + wind WW visible by default
   let showArrival = false; // TS wind arrival times (off by default — busy overlay)
@@ -561,9 +565,8 @@
 
   // --- MapServer /export hazard overlays -----------------------------------
 
-  function hazardLayerIds() {
+  function colorHazardLayerIds() {
     const ids = [];
-    if (showArrival) ids.push.apply(ids, NHC_EXPORT_ARRIVAL);
     if (windMode >= 0) ids.push(NHC_EXPORT_WINDS[windMode].id);
     if (showInundation) ids.push.apply(ids, NHC_EXPORT_INUNDATION);
     return ids;
@@ -577,19 +580,7 @@
     }, 180);
   }
 
-  function refreshHazardOverlay() {
-    if (!map) return;
-    const ids = hazardLayerIds();
-    if (!ids.length) {
-      if (hazardOverlay) {
-        map.removeLayer(hazardOverlay);
-        hazardOverlay = null;
-      }
-      return;
-    }
-
-    const bounds = map.getBounds();
-    const size = map.getSize();
+  function exportImageUrl(layerIds, bounds, size) {
     // MapServer caps image size; keep export cheap on retina phones.
     const w = Math.max(64, Math.min(Math.round(size.x), 1280));
     const h = Math.max(64, Math.min(Math.round(size.y), 1280));
@@ -607,22 +598,77 @@
       dpi: "96",
       format: "png32",
       transparent: "true",
-      layers: "show:" + ids.join(","),
+      layers: "show:" + layerIds.join(","),
       f: "image",
     });
-    const url = NHC_MAPSERVER + "/export?" + params.toString();
+    return NHC_MAPSERVER + "/export?" + params.toString();
+  }
 
-    if (!hazardOverlay) {
-      hazardOverlay = L.imageOverlay(url, bounds, {
-        opacity: 0.82,
-        interactive: false,
-        zIndex: 350,
-      }).addTo(map);
-    } else {
-      hazardOverlay.setUrl(url);
-      hazardOverlay.setBounds(bounds);
-      if (!map.hasLayer(hazardOverlay)) hazardOverlay.addTo(map);
+  function setExportOverlay(slot, url, bounds, opts) {
+    let overlay = slot.get();
+    if (!url) {
+      if (overlay) {
+        map.removeLayer(overlay);
+        slot.set(null);
+      }
+      return;
     }
+    if (!overlay) {
+      overlay = L.imageOverlay(url, bounds, {
+        opacity: opts.opacity,
+        interactive: false,
+        zIndex: opts.zIndex,
+        className: opts.className || "",
+      }).addTo(map);
+      slot.set(overlay);
+    } else {
+      overlay.setUrl(url);
+      overlay.setBounds(bounds);
+      if (!map.hasLayer(overlay)) overlay.addTo(map);
+    }
+  }
+
+  function refreshHazardOverlay() {
+    if (!map) return;
+    const bounds = map.getBounds();
+    const size = map.getSize();
+
+    // Arrival alone so we can invert black contours without wrecking wind colors.
+    const arrivalUrl = showArrival
+      ? exportImageUrl(NHC_EXPORT_ARRIVAL, bounds, size)
+      : null;
+    setExportOverlay(
+      {
+        get: () => arrivalOverlay,
+        set: (v) => {
+          arrivalOverlay = v;
+        },
+      },
+      arrivalUrl,
+      bounds,
+      {
+        opacity: 0.95,
+        zIndex: 360,
+        className: "nhc-arrival-invert",
+      }
+    );
+
+    const colorIds = colorHazardLayerIds();
+    const colorUrl = colorIds.length
+      ? exportImageUrl(colorIds, bounds, size)
+      : null;
+    setExportOverlay(
+      {
+        get: () => colorHazardOverlay,
+        set: (v) => {
+          colorHazardOverlay = v;
+        },
+      },
+      colorUrl,
+      bounds,
+      { opacity: 0.82, zIndex: 350 }
+    );
+
     bringInteractiveLayersFront();
   }
 
