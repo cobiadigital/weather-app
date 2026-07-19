@@ -11,7 +11,7 @@
     <meta name="theme-color" content="#0b1220" />
     <meta
       name="description"
-      content="Atlantic & East Pacific tropical cyclone tracks, NHC forecast cone, wind watches/warnings, and wind-arrival times."
+      content="Atlantic & East Pacific tropical cyclone tracks, NHC forecast cone, and wind watches/warnings."
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -51,7 +51,7 @@
       .legend {
         position: absolute;
         left: max(10px, env(safe-area-inset-left));
-        bottom: calc(env(safe-area-inset-bottom) + 180px);
+        bottom: calc(env(safe-area-inset-bottom) + 128px);
         z-index: 700;
         max-width: 62vw;
         padding: 8px 10px;
@@ -158,7 +158,6 @@
       <div class="row"><span class="line" style="border-color:#3d8bfd;border-top-width:4px"></span> TS warning</div>
       <div class="row"><span class="line" style="border-color:#ff9ec8;border-top-width:4px"></span> HU watch</div>
       <div class="row"><span class="line" style="border-color:#ff2d2d;border-top-width:4px"></span> HU warning</div>
-      <div class="row"><span class="line" style="border-color:#ffcc66;border-top-style:dashed"></span> Wind arrival</div>
     </aside>
 
     <!-- Slide-up storm list -->
@@ -188,14 +187,6 @@
         </button>
         <button id="refreshBtn" class="btn" type="button" aria-label="Refresh">
           <span class="btn-ico" aria-hidden="true">↻</span>
-        </button>
-      </div>
-      <div class="control-row toggles">
-        <button id="earliestBtn" class="btn toggle" type="button" aria-pressed="false">
-          <span>Earliest wind</span>
-        </button>
-        <button id="likelyBtn" class="btn toggle" type="button" aria-pressed="false">
-          <span>Likely wind</span>
         </button>
       </div>
       <div id="status" class="status">Loading tropical cyclones…</div>

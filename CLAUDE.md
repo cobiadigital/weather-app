@@ -61,14 +61,12 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
     browser needs no ZIP/KML parser. `id` is validated (`^[a-z]{2}\d{6}$`) to
     prevent SSRF; any upstream/parse failure degrades to an empty collection so
     the page still shows the current-position markers.
-  - `GET /api/nhc/gis[?layers=cone,watches,earliest,mostLikely]` → NOAA tropical
-    MapServer (`…/NHC_tropical_weather_summary/MapServer`) queried as GeoJSON
-    for the official forecast cone (layer 7), coastal wind watches/warnings
-    (layer 8, `tcww`), earliest-reasonable TS-wind arrival (layer 18), and
-    most-likely arrival (layer 19). Filtered to AL/EP; bulky MapServer fields
-    stripped. Edge-cached 300s. The tropics page loads cone+watches with
-    storms and lazy-fetches arrival layers on toggle. Failures degrade to empty
-    collections. (Storm-surge products are intentionally not proxied.)
+  - `GET /api/nhc/gis[?layers=cone,watches]` → NOAA tropical MapServer
+    (`…/NHC_tropical_weather_summary/MapServer`) queried as GeoJSON for the
+    official forecast cone (layer 7) and coastal wind watches/warnings
+    (layer 8, `tcww`). Filtered to AL/EP; bulky MapServer fields stripped.
+    Edge-cached 300s. Failures degrade to empty collections. (Wind-arrival and
+    storm-surge products are intentionally not proxied.)
 - **ZIP centroids (location fallback)** — `public/zipcodes.json`, a static
   `{ "zip": [lat, lon] }` table (~34k US ZIPs, 4-decimal coords). `app.js`
   fetches it lazily (only when a ZIP is entered) and memoizes it, so the ~0.9 MB

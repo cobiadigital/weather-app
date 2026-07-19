@@ -6,8 +6,8 @@
      proxied by this Worker at /api/nhc/current (Atlantic + East Pacific).
    - "Spaghetti" model tracks + the official (OFCL) forecast decoded from the
      NHC ATCF a-deck at /api/nhc/adeck?id=<stormId> (see src/index.js).
-   - Official cone, coastal wind watches/warnings, and TS-wind arrival contours
-     from NOAA's tropical MapServer via /api/nhc/gis.
+   - Official cone and coastal wind watches/warnings from NOAA's tropical
+     MapServer via /api/nhc/gis.
 
    Vanilla JS, IIFE-wrapped, no dependencies — matches app.js conventions.
 ---------------------------------------------------------------------------- */
@@ -39,8 +39,6 @@
     stormsBtnText: document.getElementById("stormsBtnText"),
     modelsBtn: document.getElementById("modelsBtn"),
     coneBtn: document.getElementById("coneBtn"),
-    earliestBtn: document.getElementById("earliestBtn"),
-    likelyBtn: document.getElementById("likelyBtn"),
     refreshBtn: document.getElementById("refreshBtn"),
     stormSheet: document.getElementById("stormSheet"),
     stormList: document.getElementById("stormList"),
@@ -54,14 +52,8 @@
   let ptsLayer; // official forecast points (labeled dots)
   let coneLayer; // NHC forecast cone polygons
   let wwLayer; // coastal wind watches/warnings
-  let earliestLayer; // earliest-reasonable TS-wind arrival
-  let likelyLayer; // most-likely TS-wind arrival
   let showModels = true; // spaghetti visible by default
   let showCone = true; // cone + wind WW visible by default
-  let showEarliest = false;
-  let showLikely = false;
-  let arrivalLoaded = { earliest: false, mostLikely: false };
-  let arrivalLoading = { earliest: false, mostLikely: false };
   let refreshTimer;
   let storms = []; // last-loaded storm list
   let hasFramedView = false; // fit bounds once on first load; refresh keeps the view
@@ -89,8 +81,6 @@
     // GIS overlays under tracks so official/model lines stay readable on top.
     coneLayer = L.layerGroup().addTo(map);
     wwLayer = L.layerGroup().addTo(map);
-    earliestLayer = L.layerGroup();
-    likelyLayer = L.layerGroup();
     tracksLayer = L.layerGroup().addTo(map);
     ptsLayer = L.layerGroup().addTo(map);
     stormsLayer = L.layerGroup().addTo(map);
@@ -198,16 +188,10 @@
     ptsLayer.clearLayers();
     coneLayer.clearLayers();
     wwLayer.clearLayers();
-    earliestLayer.clearLayers();
-    likelyLayer.clearLayers();
-    arrivalLoaded = { earliest: false, mostLikely: false };
-    arrivalLoading = { earliest: false, mostLikely: false };
   }
 
-  // --- Official NHC GIS (cone / wind WW / arrival) via MapServer ------------
+  // --- Official NHC GIS (cone / wind WW) via MapServer ---------------------
 
-  // Cone + wind WW load with storms (shown by default). Arrival contours are
-  // larger and lazy-loaded the first time their toggle is turned on.
   async function loadGis(bounds) {
     let data;
     try {
@@ -222,26 +206,6 @@
     addCone(data.cone, bounds);
     addWatches(data.watches, bounds);
     applyGisVisibility();
-  }
-
-  async function ensureArrival(kind) {
-    const key = kind === "earliest" ? "earliest" : "mostLikely";
-    const group = kind === "earliest" ? earliestLayer : likelyLayer;
-    if (arrivalLoaded[key] || arrivalLoading[key]) return;
-    arrivalLoading[key] = true;
-    try {
-      const res = await fetch("/api/nhc/gis?layers=" + encodeURIComponent(key));
-      if (!res.ok) return;
-      const data = await res.json();
-      group.clearLayers();
-      addArrival(data[key], group, null);
-      arrivalLoaded[key] = true;
-      applyGisVisibility();
-    } catch (_) {
-      // leave toggle on; user can refresh
-    } finally {
-      arrivalLoading[key] = false;
-    }
   }
 
   function addCone(fc, bounds) {
@@ -292,24 +256,6 @@
         extendBoundsFromGeom(feat.geometry, bounds);
       },
     }).addTo(wwLayer);
-  }
-
-  function addArrival(fc, group, bounds) {
-    if (!fc || !fc.features || !fc.features.length) return;
-    L.geoJSON(fc, {
-      style: {
-        color: "#ffcc66",
-        weight: 2,
-        opacity: 0.9,
-        dashArray: "6 4",
-      },
-      onEachFeature: (feat, layer) => {
-        const p = feat.properties || {};
-        const when = String(p.arrival_time || "").trim();
-        if (when) layer.bindTooltip(when, { sticky: true, permanent: false });
-        extendBoundsFromGeom(feat.geometry, bounds);
-      },
-    }).addTo(group);
   }
 
   function extendBoundsFromGeom(geom, bounds) {
@@ -529,39 +475,9 @@
     );
   }
 
-  function toggleEarliest() {
-    showEarliest = !showEarliest;
-    els.earliestBtn.setAttribute("aria-pressed", showEarliest ? "true" : "false");
-    applyGisVisibility();
-    if (showEarliest) {
-      setStatus("Loading earliest TS-wind arrival…");
-      ensureArrival("earliest").then(() => {
-        if (showEarliest) setStatus("Earliest reasonable TS-wind arrival shown.");
-      });
-    } else {
-      setStatus("Earliest wind arrival hidden.");
-    }
-  }
-
-  function toggleLikely() {
-    showLikely = !showLikely;
-    els.likelyBtn.setAttribute("aria-pressed", showLikely ? "true" : "false");
-    applyGisVisibility();
-    if (showLikely) {
-      setStatus("Loading most likely TS-wind arrival…");
-      ensureArrival("likely").then(() => {
-        if (showLikely) setStatus("Most likely TS-wind arrival shown.");
-      });
-    } else {
-      setStatus("Most likely wind arrival hidden.");
-    }
-  }
-
   function applyGisVisibility() {
     setGroupOnMap(coneLayer, showCone);
     setGroupOnMap(wwLayer, showCone);
-    setGroupOnMap(earliestLayer, showEarliest);
-    setGroupOnMap(likelyLayer, showLikely);
     // Re-adding overlays can stack above markers; keep interaction targets on top.
     if (map.hasLayer(tracksLayer)) tracksLayer.bringToFront();
     if (map.hasLayer(ptsLayer)) ptsLayer.bringToFront();
@@ -676,8 +592,6 @@
     els.stormClose.addEventListener("click", closeSheet);
     els.modelsBtn.addEventListener("click", toggleModels);
     els.coneBtn.addEventListener("click", toggleCone);
-    els.earliestBtn.addEventListener("click", toggleEarliest);
-    els.likelyBtn.addEventListener("click", toggleLikely);
     els.refreshBtn.addEventListener("click", () => loadStorms(true));
 
     document.addEventListener("visibilitychange", () => {
