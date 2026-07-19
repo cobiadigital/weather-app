@@ -136,11 +136,32 @@
 
   // --- Diagnostics ---------------------------------------------------------
 
-  // Opt-in overlay (add ?debug to the URL) that dumps the viewport/safe-area
-  // numbers so bottom-spacing issues in iOS standalone/web-app mode can be
-  // measured on a real device instead of guessed at. No-op without ?debug.
+  // True when diagnostics are on. ?debug (or #debug) turns it on and remembers
+  // it in localStorage, because iOS "Add to Home Screen" launches the manifest
+  // start_url and drops the query string — so once armed in Safari, the overlay
+  // still shows in the installed web-app. ?nodebug clears it.
+  function debugEnabled() {
+    try {
+      const url = location.search + location.hash;
+      if (/[?&#]nodebug\b/.test(url)) {
+        localStorage.removeItem("bendarDebug");
+        return false;
+      }
+      if (/[?&#]debug\b/.test(url)) {
+        localStorage.setItem("bendarDebug", "1");
+        return true;
+      }
+      return localStorage.getItem("bendarDebug") === "1";
+    } catch (e) {
+      return /[?&#]debug\b/.test(location.search + location.hash);
+    }
+  }
+
+  // Opt-in overlay that dumps the viewport/safe-area numbers so bottom-spacing
+  // issues in iOS standalone/web-app mode can be measured on a real device
+  // instead of guessed at. No-op unless debug is armed (see debugEnabled).
   function initDebugOverlay() {
-    if (!/[?&]debug\b/.test(location.search)) return;
+    if (!debugEnabled()) return;
 
     // Read the live safe-area insets via a probe whose padding is env(...).
     const probe = document.createElement("div");
