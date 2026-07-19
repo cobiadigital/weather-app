@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------------
-   Local Radar — front-end logic.
+   Bendar.app — front-end logic.
 
    - Leaflet map with an OpenStreetMap base layer.
    - NEXRAD radar overlay from the Iowa Environmental Mesonet (IEM), which

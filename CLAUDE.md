@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-**Local Radar** — a mobile-first web app for viewing local NEXRAD weather radar
+**Bendar.app** — a mobile-first web app for viewing local NEXRAD weather radar
 and active National Weather Service alerts. It's deployed as a **Cloudflare
 Worker** using **Static Assets**. All data is public and comes from the NWS.
 

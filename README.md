@@ -1,8 +1,10 @@
-# Local Radar 🌧️
+# Bendar.app 🌧️
 
-A tiny mobile-first web app for checking your **local weather radar**, built as a
+**Ben's instant radar and weather app** ([bendar.app](https://bendar.app)) — a
+tiny mobile-first web app for checking your **local weather radar**, built as a
 **Cloudflare Worker**. It shows live NEXRAD radar over a map, plus any active
-National Weather Service alerts for your location.
+National Weather Service alerts for your location, and a `/tropics` page with
+tropical-cyclone model tracks and the NHC official forecast.
 
 All data is public and comes from the **National Weather Service**:
 
