@@ -58,6 +58,7 @@
     alertClose: document.getElementById("alertClose"),
     cloudsBtn: document.getElementById("cloudsBtn"),
     loopBtn: document.getElementById("loopBtn"),
+    shareBtn: document.getElementById("shareBtn"),
     installBtn: document.getElementById("installBtn"),
     installSheet: document.getElementById("installSheet"),
     installClose: document.getElementById("installClose"),
@@ -73,6 +74,7 @@
   };
 
   let map;
+  let basemapLayer; // CARTO dark base tiles
   let radarLayer; // live radar (current frame)
   let cloudLayer; // GOES satellite cloud layer (optional)
   let meMarker;
@@ -173,13 +175,17 @@
       minZoom: 3,
     }).setView([start.lat, start.lon], saved ? LOCATED_ZOOM : DEFAULT_VIEW.zoom);
 
-    L.tileLayer(
+    // crossOrigin lets us later read these tiles back off a <canvas> for the
+    // "Share as image" feature without tainting it (all sources send CORS
+    // headers). See shareView().
+    basemapLayer = L.tileLayer(
       "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
       {
         attribution:
           '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
         subdomains: "abcd",
         maxZoom: 19,
+        crossOrigin: "anonymous",
       }
     ).addTo(map);
 
@@ -189,6 +195,7 @@
         'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
       zIndex: 5,
       maxZoom: 15,
+      crossOrigin: "anonymous",
     }).addTo(map);
 
     if (saved) {
@@ -561,6 +568,7 @@
         'Clouds: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NOAA GOES',
       zIndex: 4, // below the radar (zIndex 5)
       maxZoom: 15,
+      crossOrigin: "anonymous",
     }).addTo(map);
     setToggle(els.cloudsBtn, true);
     setStatus("Cloud cover (GOES satellite) on.");
@@ -608,6 +616,7 @@
         opacity: i === loopIndex ? op : 0,
         zIndex: 5,
         maxZoom: 15,
+        crossOrigin: "anonymous", // keep loop frames canvas-exportable (Share)
         updateWhenIdle: true, // don't refetch every frame while panning
         keepBuffer: 0, // 48 layers — keep each one's memory footprint small
         // One attribution entry is plenty (Leaflet de-dupes identical text).
@@ -796,6 +805,201 @@
     els.installSheet.setAttribute("aria-hidden", "true");
   }
 
+  // --- Share current view as an image --------------------------------------
+
+  // Render the on-screen map to a PNG and hand it to the native share sheet as
+  // a file (Web Share API Level 2), so people can send it like a photo. Falls
+  // back to a plain download where file-sharing isn't supported (most desktops).
+  async function shareView() {
+    if (!map) return;
+    els.shareBtn.disabled = true;
+    setStatus("Preparing image…");
+
+    let blob;
+    try {
+      blob = await captureView();
+    } catch (_) {
+      setStatus("Couldn't create the image.", true);
+      els.shareBtn.disabled = false;
+      return;
+    }
+
+    const file = new File([blob], "bendar-radar.png", { type: "image/png" });
+    const data = {
+      files: [file],
+      title: "Bendar.app radar",
+      text: "Live weather radar — Bendar.app",
+    };
+
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share(data);
+        setStatus("Shared.");
+      } else {
+        downloadBlob(blob, "bendar-radar.png");
+        setStatus("Radar image saved.");
+      }
+    } catch (err) {
+      // User dismissing the share sheet throws AbortError — not an error.
+      if (err && err.name === "AbortError") {
+        setStatus("Share canceled.");
+      } else {
+        downloadBlob(blob, "bendar-radar.png");
+        setStatus("Radar image saved.");
+      }
+    } finally {
+      els.shareBtn.disabled = false;
+    }
+  }
+
+  // Paint the current map view (base + overlays + location pin + caption) onto
+  // a canvas and resolve a PNG blob. Every tile source sends CORS headers and
+  // the layers set crossOrigin, so the canvas stays untainted and exportable.
+  function captureView() {
+    const size = map.getSize(); // CSS px (the visible map)
+    const zoom = map.getZoom();
+    const origin = map.getPixelBounds().min; // viewport top-left, layer px
+
+    // Cap at 2× for a crisp share without ballooning the file on hi-dpi phones.
+    const scale = Math.min(2, window.devicePixelRatio || 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(size.x * scale);
+    canvas.height = Math.round(size.y * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+
+    // Backdrop matches the map's base so any gap (a not-yet-loaded tile) blends.
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, size.x, size.y);
+
+    // Bottom-to-top, mirroring the on-screen z-order:
+    // basemap → clouds (zIndex 4) → radar (zIndex 5).
+    drawTileLayer(ctx, basemapLayer, zoom, origin);
+    if (cloudLayer) drawTileLayer(ctx, cloudLayer, zoom, origin);
+    if (loopOn && loopLayers[loopIndex]) {
+      drawTileLayer(ctx, loopLayers[loopIndex], zoom, origin);
+    } else if (radarLayer && map.hasLayer(radarLayer)) {
+      drawTileLayer(ctx, radarLayer, zoom, origin);
+    }
+
+    if (meMarker) {
+      const p = map.latLngToContainerPoint(meMarker.getLatLng());
+      drawPin(ctx, p.x, p.y);
+    }
+    drawCaption(ctx, size);
+
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))),
+        "image/png"
+      );
+    });
+  }
+
+  // Copy a Leaflet grid layer's currently-loaded tiles onto the canvas at their
+  // viewport offset. Tile global px = coords * 256; subtract the viewport origin
+  // to get the on-canvas position. WMS loop frames sit on the same tile grid, so
+  // this handles them too.
+  function drawTileLayer(ctx, layer, zoom, origin) {
+    const tiles = layer && layer._tiles;
+    if (!tiles) return;
+    const T = 256; // Leaflet's default tile size
+    const op = layer.options.opacity == null ? 1 : layer.options.opacity;
+    if (op <= 0) return;
+    ctx.globalAlpha = op;
+    for (const key in tiles) {
+      const tile = tiles[key];
+      if (!tile.current || !tile.loaded || !tile.el) continue;
+      if (!tile.coords || tile.coords.z !== zoom) continue;
+      const el = tile.el;
+      // Skip broken/undecoded images — drawImage would throw on them.
+      if (el.tagName === "IMG" && !el.naturalWidth) continue;
+      const x = tile.coords.x * T - origin.x;
+      const y = tile.coords.y * T - origin.y;
+      try {
+        ctx.drawImage(el, x, y, T, T);
+      } catch (_) {
+        /* one bad tile shouldn't sink the whole capture */
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // The location marker, matching the CSS .me-marker (accent dot, white ring,
+  // soft glow).
+  function drawPin(ctx, x, y) {
+    ctx.beginPath();
+    ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(59, 130, 246, 0.35)";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#3b82f6";
+    ctx.fill();
+  }
+
+  // Branding + timestamp + source attribution along the bottom edge. Two rows
+  // (title/time, then attribution) so nothing collides on a narrow phone width.
+  function drawCaption(ctx, size) {
+    const barH = 52;
+    const top = size.y - barH;
+    const grad = ctx.createLinearGradient(0, top - 14, 0, size.y);
+    grad.addColorStop(0, "rgba(11, 18, 32, 0)");
+    grad.addColorStop(1, "rgba(11, 18, 32, 0.9)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, top - 14, size.x, barH + 14);
+
+    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
+    const x = 12;
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+
+    // Row 1: "Bendar.app" (bold) · <live radar / loop time> (dim).
+    ctx.fillStyle = "#dbe8ff";
+    ctx.font = "600 15px " + font;
+    ctx.fillText("Bendar.app", x, top + 22);
+    const brandW = ctx.measureText("Bendar.app").width;
+    ctx.fillStyle = "rgba(219, 232, 255, 0.8)";
+    ctx.font = "400 13px " + font;
+    ctx.fillText("  ·  " + captionStamp(), x + brandW, top + 22);
+
+    // Row 2: source attribution (OSM/CARTO/IEM licensing).
+    ctx.fillStyle = "rgba(219, 232, 255, 0.5)";
+    ctx.font = "400 10px " + font;
+    ctx.fillText(
+      "Radar: NWS NEXRAD / IEM  ·  © OpenStreetMap, © CARTO",
+      x,
+      top + 42
+    );
+  }
+
+  function captionStamp() {
+    if (loopOn && loopFrames[loopIndex]) {
+      if (loopIndex === loopFrames.length - 1) return "Radar loop · now";
+      const t = loopFrames[loopIndex].toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      return "Radar loop · " + t;
+    }
+    return "Live radar · " + timeNow();
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   // --- Helpers -------------------------------------------------------------
 
   function setStatus(msg, isError) {
@@ -842,6 +1046,7 @@
     els.alertClose.addEventListener("click", closeSheet);
     els.cloudsBtn.addEventListener("click", toggleClouds);
     els.loopBtn.addEventListener("click", toggleLoop);
+    els.shareBtn.addEventListener("click", shareView);
     els.zipForm.addEventListener("submit", (e) => {
       e.preventDefault();
       goToZip();
