@@ -64,6 +64,7 @@
   let arrivalLoading = { earliest: false, mostLikely: false };
   let refreshTimer;
   let storms = []; // last-loaded storm list
+  let hasFramedView = false; // fit bounds once on first load; refresh keeps the view
 
   // --- Map setup -----------------------------------------------------------
 
@@ -136,7 +137,11 @@
 
     if (!storms.length) {
       renderEmpty();
-      map.setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
+      // Only jump to the default basin view on the very first empty load.
+      if (!hasFramedView) {
+        map.setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
+        hasFramedView = true;
+      }
       setStatus("No active tropical cyclones.");
       els.stormsBtnText.textContent = "Storms";
       return;
@@ -169,7 +174,10 @@
       "Showing " + storms.length + " active storm" + (storms.length > 1 ? "s" : "") + "."
     );
 
-    if (bounds.isValid()) {
+    // Frame once on first successful load. Refresh / auto-refresh / tab-focus
+    // reloads keep whatever pan/zoom the user has.
+    const shouldFrame = !hasFramedView;
+    if (shouldFrame && bounds.isValid()) {
       map.fitBounds(bounds, { padding: [60, 60], maxZoom: 6 });
     }
 
@@ -178,9 +186,10 @@
       Promise.all(storms.map((s) => loadTracks(s, bounds))),
       loadGis(bounds),
     ]);
-    if (bounds.isValid()) {
+    if (shouldFrame && bounds.isValid()) {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6 });
     }
+    if (shouldFrame) hasFramedView = true;
   }
 
   function clearOverlayLayers() {
