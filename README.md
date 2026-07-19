@@ -4,7 +4,8 @@
 tiny mobile-first web app for checking your **local weather radar**, built as a
 **Cloudflare Worker**. It shows live NEXRAD radar over a map, plus any active
 National Weather Service alerts for your location, and a `/tropics` page with
-tropical-cyclone model tracks and the NHC official forecast.
+tropical-cyclone model tracks, the NHC official forecast, and optional NHC
+hazard overlays (TS wind arrival, probabilistic winds, storm-surge inundation).
 
 All data is public and comes from the **National Weather Service**:
 

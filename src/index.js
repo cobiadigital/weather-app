@@ -19,7 +19,8 @@ const NWS_BASE = "https://api.weather.gov";
 //    per storm holding every forecast aid (GFS, ECMWF, HWRF, the OFCL official
 //    forecast, consensus aids, …) — i.e. the "spaghetti" model tracks.
 //  - NOAA tropical MapServer: official cone + coastal wind watches/warnings as
-//    queryable GeoJSON (no KMZ).
+//    queryable GeoJSON (no KMZ). Arrival / probabilistic-wind / inundation
+//    products are loaded client-side via MapServer /export (see tropics.js).
 const NHC_CURRENT_URL = "https://www.nhc.noaa.gov/CurrentStorms.json";
 const NHC_ADECK_BASE = "https://ftp.nhc.noaa.gov/atcf/aid_public/";
 const NHC_MAPSERVER =

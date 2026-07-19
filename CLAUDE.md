@@ -65,8 +65,19 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
     (`…/NHC_tropical_weather_summary/MapServer`) queried as GeoJSON for the
     official forecast cone (layer 7) and coastal wind watches/warnings
     (layer 8, `tcww`). Filtered to AL/EP; bulky MapServer fields stripped.
-    Edge-cached 300s. Failures degrade to empty collections. (Wind-arrival and
-    storm-surge products are intentionally not proxied.)
+    Edge-cached 300s. Failures degrade to empty collections.
+  - **Hazard overlays on `/tropics` (client-side MapServer `/export`)** — the
+    same NOAA tropical MapServer, loaded as viewport PNG image overlays so the
+    browser gets official NHC symbology/labels without pulling multi‑MB
+    GeoJSON (and so inundation, a raster mosaic, works at all):
+    - Arrival Time of TS Winds — layers 18 (earliest reasonable) + 19 (most
+      likely)
+    - Probabilistic Winds — layers 30 / 31 / 32 (34 / 50 / 64 kt); the Winds
+      button cycles thresholds
+    - Inundation — layer 21 (storm-surge inundation mosaic; empty when NHC
+      has not issued a product)
+    Toggles default off. The Worker does not proxy these; Leaflet
+    `imageOverlay` hits MapServer directly (images don't need CORS).
 - **ZIP centroids (location fallback)** — `public/zipcodes.json`, a static
   `{ "zip": [lat, lon] }` table (~34k US ZIPs, 4-decimal coords). `app.js`
   fetches it lazily (only when a ZIP is entered) and memoizes it, so the ~0.9 MB

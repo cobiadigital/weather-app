@@ -7,7 +7,10 @@
    - "Spaghetti" model tracks + the official (OFCL) forecast decoded from the
      NHC ATCF a-deck at /api/nhc/adeck?id=<stormId> (see src/index.js).
    - Official cone and coastal wind watches/warnings from NOAA's tropical
-     MapServer via /api/nhc/gis.
+     MapServer via /api/nhc/gis (GeoJSON).
+   - Arrival-time, probabilistic-wind, and inundation products from the same
+     MapServer as viewport export PNGs (official symbology + labels; inundation
+     is a raster mosaic so GeoJSON isn't an option).
 
    Vanilla JS, IIFE-wrapped, no dependencies — matches app.js conventions.
 ---------------------------------------------------------------------------- */
@@ -18,6 +21,19 @@
   // Centered on the tropical Atlantic; bounds are refit once storms load.
   const DEFAULT_VIEW = { lat: 22, lon: -72, zoom: 4 };
   const REFRESH_MS = 10 * 60 * 1000; // advisories update a few times a day
+
+  // Same MapServer as /api/nhc/gis; hazard products use /export (see NHC_EXPORT_*).
+  const NHC_MAPSERVER =
+    "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather_summary/MapServer";
+  // Layer ids from MapServer?f=pjson (Arrival Time group 17, Prob. Winds 29, Inundation 21).
+  const NHC_EXPORT_ARRIVAL = [18, 19]; // earliest reasonable + most likely TS arrival
+  const NHC_EXPORT_INUNDATION = [21]; // inundation mosaic (raster + footprint)
+  // Probabilistic winds: tap cycles 34 → 50 → 64 kt (off when index wraps).
+  const NHC_EXPORT_WINDS = [
+    { id: 30, label: "34 kt", status: "34-kt (tropical storm) wind probabilities" },
+    { id: 31, label: "50 kt", status: "50-kt wind probabilities" },
+    { id: 32, label: "64 kt", status: "64-kt (hurricane) wind probabilities" },
+  ];
 
   // Coastal wind watch/warning line colors (NHC interactive-graphic palette).
   const WW_COLORS = {
@@ -39,6 +55,10 @@
     stormsBadge: document.getElementById("stormsBadge"),
     modelsBtn: document.getElementById("modelsBtn"),
     coneBtn: document.getElementById("coneBtn"),
+    arrivalBtn: document.getElementById("arrivalBtn"),
+    windsBtn: document.getElementById("windsBtn"),
+    windsBtnLabel: document.getElementById("windsBtnLabel"),
+    inundationBtn: document.getElementById("inundationBtn"),
     refreshBtn: document.getElementById("refreshBtn"),
     stormSheet: document.getElementById("stormSheet"),
     stormList: document.getElementById("stormList"),
@@ -52,8 +72,13 @@
   let ptsLayer; // official forecast points (labeled dots)
   let coneLayer; // NHC forecast cone polygons
   let wwLayer; // coastal wind watches/warnings
+  let hazardOverlay = null; // L.imageOverlay for MapServer /export hazards
   let showModels = true; // spaghetti visible by default
   let showCone = true; // cone + wind WW visible by default
+  let showArrival = false; // TS wind arrival times (off by default — busy overlay)
+  let showInundation = false; // storm-surge inundation mosaic
+  let windMode = -1; // index into NHC_EXPORT_WINDS, or -1 when off
+  let hazardRefreshTimer = null;
   let refreshTimer;
   let storms = []; // last-loaded storm list
   let hasFramedView = false; // fit bounds once on first load; refresh keeps the view
@@ -85,9 +110,16 @@
     ptsLayer = L.layerGroup().addTo(map);
     stormsLayer = L.layerGroup().addTo(map);
 
+    // Debounced export refresh — MapServer /export is per-viewport.
+    map.on("moveend zoomend resize", scheduleHazardOverlayRefresh);
+
     setTimeout(() => map.invalidateSize(), 0);
     window.addEventListener("orientationchange", () => {
-      setTimeout(() => map && map.invalidateSize(), 250);
+      setTimeout(() => {
+        if (!map) return;
+        map.invalidateSize();
+        scheduleHazardOverlayRefresh();
+      }, 250);
     });
   }
 
@@ -474,13 +506,124 @@
     );
   }
 
+  function toggleArrival() {
+    showArrival = !showArrival;
+    els.arrivalBtn.setAttribute("aria-pressed", showArrival ? "true" : "false");
+    refreshHazardOverlay();
+    setStatus(
+      showArrival
+        ? "Arrival time of tropical-storm-force winds shown."
+        : "Wind-arrival overlay hidden."
+    );
+  }
+
+  // Cycle off → 34 → 50 → 64 → off so one button covers the Probabilistic Winds group.
+  function toggleWinds() {
+    windMode = windMode + 1;
+    if (windMode >= NHC_EXPORT_WINDS.length) windMode = -1;
+    const on = windMode >= 0;
+    const mode = on ? NHC_EXPORT_WINDS[windMode] : null;
+    els.windsBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    if (els.windsBtnLabel) {
+      els.windsBtnLabel.textContent = on ? mode.label : "Winds";
+    }
+    refreshHazardOverlay();
+    setStatus(on ? mode.status + " shown." : "Probabilistic winds hidden.");
+  }
+
+  function toggleInundation() {
+    showInundation = !showInundation;
+    els.inundationBtn.setAttribute(
+      "aria-pressed",
+      showInundation ? "true" : "false"
+    );
+    refreshHazardOverlay();
+    setStatus(
+      showInundation
+        ? "Storm-surge inundation shown (when NHC has issued a product)."
+        : "Inundation overlay hidden."
+    );
+  }
+
   function applyGisVisibility() {
     setGroupOnMap(coneLayer, showCone);
     setGroupOnMap(wwLayer, showCone);
+    bringInteractiveLayersFront();
+  }
+
+  function bringInteractiveLayersFront() {
     // Re-adding overlays can stack above markers; keep interaction targets on top.
+    if (!map) return;
     if (map.hasLayer(tracksLayer)) tracksLayer.bringToFront();
     if (map.hasLayer(ptsLayer)) ptsLayer.bringToFront();
     if (map.hasLayer(stormsLayer)) stormsLayer.bringToFront();
+  }
+
+  // --- MapServer /export hazard overlays -----------------------------------
+
+  function hazardLayerIds() {
+    const ids = [];
+    if (showArrival) ids.push.apply(ids, NHC_EXPORT_ARRIVAL);
+    if (windMode >= 0) ids.push(NHC_EXPORT_WINDS[windMode].id);
+    if (showInundation) ids.push.apply(ids, NHC_EXPORT_INUNDATION);
+    return ids;
+  }
+
+  function scheduleHazardOverlayRefresh() {
+    if (hazardRefreshTimer) clearTimeout(hazardRefreshTimer);
+    hazardRefreshTimer = setTimeout(() => {
+      hazardRefreshTimer = null;
+      refreshHazardOverlay();
+    }, 180);
+  }
+
+  function refreshHazardOverlay() {
+    if (!map) return;
+    const ids = hazardLayerIds();
+    if (!ids.length) {
+      if (hazardOverlay) {
+        map.removeLayer(hazardOverlay);
+        hazardOverlay = null;
+      }
+      return;
+    }
+
+    const bounds = map.getBounds();
+    const size = map.getSize();
+    // MapServer caps image size; keep export cheap on retina phones.
+    const w = Math.max(64, Math.min(Math.round(size.x), 1280));
+    const h = Math.max(64, Math.min(Math.round(size.y), 1280));
+    const bbox = [
+      bounds.getWest(),
+      bounds.getSouth(),
+      bounds.getEast(),
+      bounds.getNorth(),
+    ].join(",");
+    const params = new URLSearchParams({
+      bbox: bbox,
+      bboxSR: "4326",
+      imageSR: "4326",
+      size: w + "," + h,
+      dpi: "96",
+      format: "png32",
+      transparent: "true",
+      layers: "show:" + ids.join(","),
+      f: "image",
+    });
+    const url = NHC_MAPSERVER + "/export?" + params.toString();
+
+    if (!hazardOverlay) {
+      hazardOverlay = L.imageOverlay(url, bounds, {
+        opacity: 0.82,
+        interactive: false,
+        zIndex: 350,
+      }).addTo(map);
+    } else {
+      hazardOverlay.setUrl(url);
+      hazardOverlay.setBounds(bounds);
+      if (!map.hasLayer(hazardOverlay)) hazardOverlay.addTo(map);
+    }
+    bringInteractiveLayersFront();
   }
 
   function setGroupOnMap(group, on) {
@@ -601,6 +744,9 @@
     els.stormClose.addEventListener("click", closeSheet);
     els.modelsBtn.addEventListener("click", toggleModels);
     els.coneBtn.addEventListener("click", toggleCone);
+    els.arrivalBtn.addEventListener("click", toggleArrival);
+    els.windsBtn.addEventListener("click", toggleWinds);
+    els.inundationBtn.addEventListener("click", toggleInundation);
     els.refreshBtn.addEventListener("click", () => loadStorms(true));
 
     document.addEventListener("visibilitychange", () => {
