@@ -30,8 +30,10 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
 - **Radar loop (last 4 h)** — IEM's time-enabled NEXRAD WMS
   `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
   `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
-  `app.js` loads this via `L.tileLayer.wms` and steps the `time` param across
-  48 frames. It's a different endpoint than the live tile cache above.
+  `app.js` preloads one `L.tileLayer.wms` per 5-minute frame (48 layers, all
+  added at opacity 0) and animates by toggling opacity between already-loaded
+  layers, so frames don't flash blank while tiles load. It's a different
+  endpoint than the live tile cache above.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES
