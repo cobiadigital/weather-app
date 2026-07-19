@@ -813,10 +813,10 @@
   // a file (Web Share API Level 2), so people can send it like a photo. Falls
   // back to a plain download where file-sharing isn't supported (most desktops).
   //
-  // iOS Safari will not deliver both a file and text/url in one share — extras
-  // are dropped or demote the image — so there we share the image alone (with
-  // https://bendar.app burned into the caption) and copy the link for paste.
-  // Android/Chromium usually accept files + text + url together.
+  // Share files + title + text (same shape that already delivered both image and
+  // caption on iOS). Put the site in `text` as a full https:// URL so targets
+  // can make it tappable — but do not also set `url`, which iOS often treats as
+  // a link-only share and drops the attachment for.
   async function shareView() {
     if (!map) return;
     els.shareBtn.disabled = true;
@@ -832,32 +832,15 @@
     }
 
     const file = new File([blob], "bendar-radar.png", { type: "image/png" });
-    const withLink = {
+    const data = {
       files: [file],
       title: "Bendar.app radar",
       text: SHARE_TEXT,
-      url: SHARE_URL,
     };
-    const filesOnly = { files: [file] };
 
     try {
-      if (canSharePayload(withLink) && !isAppleTouchShare()) {
-        await navigator.share(withLink);
-        setStatus("Shared.");
-      } else if (canSharePayload(filesOnly)) {
-        await navigator.share(filesOnly);
-        const copied = await copyShareUrl();
-        setStatus(
-          copied
-            ? "Shared. Link copied — paste it with the image."
-            : "Shared."
-        );
-      } else if (typeof navigator.share === "function") {
-        await navigator.share({
-          title: "Bendar.app radar",
-          text: SHARE_TEXT,
-          url: SHARE_URL,
-        });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share(data);
         setStatus("Shared.");
       } else {
         downloadBlob(blob, "bendar-radar.png");
@@ -873,32 +856,6 @@
       }
     } finally {
       els.shareBtn.disabled = false;
-    }
-  }
-
-  function canSharePayload(data) {
-    try {
-      return !!(navigator.canShare && navigator.canShare(data));
-    } catch (_) {
-      return false;
-    }
-  }
-
-  // iPhone / iPad (incl. iPadOS desktop-UA mode): file+text/url shares are
-  // unreliable — many targets keep only the text and drop the image.
-  function isAppleTouchShare() {
-    const ua = navigator.userAgent || "";
-    if (/iPad|iPhone|iPod/.test(ua)) return true;
-    return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
-  }
-
-  async function copyShareUrl() {
-    try {
-      if (!navigator.clipboard || !navigator.clipboard.writeText) return false;
-      await navigator.clipboard.writeText(SHARE_URL);
-      return true;
-    } catch (_) {
-      return false;
     }
   }
 
@@ -1008,13 +965,11 @@
     ctx.textBaseline = "alphabetic";
     ctx.textAlign = "left";
 
-    // Row 1: site URL (bold) · <live radar / loop time> (dim).
-    // Full https:// URL so the shared PNG still carries a recognizable link
-    // when the OS won't attach text alongside the image (iOS).
+    // Row 1: "Bendar.app" (bold) · <live radar / loop time> (dim).
     ctx.fillStyle = "#dbe8ff";
     ctx.font = "600 15px " + font;
-    ctx.fillText(SHARE_URL, x, top + 22);
-    const brandW = ctx.measureText(SHARE_URL).width;
+    ctx.fillText("Bendar.app", x, top + 22);
+    const brandW = ctx.measureText("Bendar.app").width;
     ctx.fillStyle = "rgba(219, 232, 255, 0.8)";
     ctx.font = "400 13px " + font;
     ctx.fillText("  ·  " + captionStamp(), x + brandW, top + 22);
