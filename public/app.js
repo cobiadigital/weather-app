@@ -158,97 +158,6 @@
     window.visualViewport.addEventListener("resize", setViewportHeight);
   }
 
-  // --- Diagnostics ---------------------------------------------------------
-
-  // True when diagnostics are on. ?debug (or #debug) turns it on and remembers
-  // it in localStorage, because iOS "Add to Home Screen" launches the manifest
-  // start_url and drops the query string — so once armed in Safari, the overlay
-  // still shows in the installed web-app. ?nodebug clears it.
-  function debugEnabled() {
-    try {
-      const url = location.search + location.hash;
-      if (/[?&#]nodebug\b/.test(url)) {
-        localStorage.removeItem("bendarDebug");
-        return false;
-      }
-      if (/[?&#]debug\b/.test(url)) {
-        localStorage.setItem("bendarDebug", "1");
-        return true;
-      }
-      return localStorage.getItem("bendarDebug") === "1";
-    } catch (e) {
-      return /[?&#]debug\b/.test(location.search + location.hash);
-    }
-  }
-
-  // Opt-in overlay that dumps the viewport/safe-area numbers so bottom-spacing
-  // issues in iOS standalone/web-app mode can be measured on a real device
-  // instead of guessed at. No-op unless debug is armed (see debugEnabled).
-  function initDebugOverlay() {
-    if (!debugEnabled()) return;
-
-    // Read the live safe-area insets via a probe whose padding is env(...).
-    const probe = document.createElement("div");
-    probe.style.cssText =
-      "position:absolute;visibility:hidden;pointer-events:none;" +
-      "padding:env(safe-area-inset-top) env(safe-area-inset-right) " +
-      "env(safe-area-inset-bottom) env(safe-area-inset-left);";
-    document.body.appendChild(probe);
-
-    const box = document.createElement("pre");
-    // Pad the top past the status bar / Dynamic Island so the first lines aren't
-    // hidden, and make it tappable to copy (pointer-events:auto).
-    box.style.cssText =
-      "position:fixed;top:0;left:0;z-index:9999;margin:0;" +
-      "padding:calc(env(safe-area-inset-top, 0px) + 8px) 10px 8px;" +
-      "max-width:100vw;font:11px/1.35 ui-monospace,Menlo,monospace;" +
-      "color:#0f0;background:rgba(0,0,0,.72);white-space:pre;" +
-      "pointer-events:auto;text-shadow:0 1px 2px #000;";
-    document.body.appendChild(box);
-
-    const px = (v) => Math.round(v) + "px";
-    let lastText = "";
-    function render() {
-      const cs = getComputedStyle(probe);
-      const de = document.documentElement;
-      const controls = document.querySelector(".controls");
-      const cRect = controls && controls.getBoundingClientRect();
-      lastText =
-        "standalone: " + isStandalone() + "\n" +
-        "innerHeight: " + px(window.innerHeight) + "\n" +
-        "doc.clientH: " + px(de.clientHeight) + "\n" +
-        "visualVP.h : " +
-        (window.visualViewport ? px(window.visualViewport.height) : "n/a") +
-        "\n" +
-        "screen.h/av: " + px(screen.height) + " / " + px(screen.availHeight) + "\n" +
-        "measured→vh: " + px(measuredViewportHeight()) +
-        " (--vh " + (de.style.getPropertyValue("--vh") || "unset") + ")\n" +
-        "safe T/R/B/L: " +
-        cs.paddingTop + " / " + cs.paddingRight + " / " +
-        cs.paddingBottom + " / " + cs.paddingLeft + "\n" +
-        "controls.bottom: " + (cRect ? px(cRect.bottom) : "n/a") +
-        " / screen " + px(screen.height) + "\n" +
-        "dpr: " + window.devicePixelRatio + "  —  tap to copy";
-      box.textContent = lastText;
-    }
-    box.addEventListener("click", () => {
-      const done = () => {
-        box.textContent = "copied!";
-        setTimeout(render, 700);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(lastText).then(done, done);
-      } else {
-        done();
-      }
-    });
-    render();
-    window.addEventListener("resize", render);
-    if (window.visualViewport)
-      window.visualViewport.addEventListener("resize", render);
-    setInterval(render, 500);
-  }
-
   // --- Map setup -----------------------------------------------------------
 
   function initMap() {
@@ -906,7 +815,6 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     setViewportHeightSettled();
-    initDebugOverlay();
     initMap();
     bind();
     // Auto-request location on first load if we don't have a saved spot;

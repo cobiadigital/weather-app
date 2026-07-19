@@ -2,7 +2,7 @@
   "name": "Bendar.app — Ben's instant radar & weather",
   "short_name": "Bendar.app",
   "description": "Ben's instant radar and weather app: live NEXRAD radar, active National Weather Service alerts, and tropical cyclone tracks.",
-  "start_url": "/?debug",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
