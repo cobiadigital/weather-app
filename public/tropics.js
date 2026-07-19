@@ -198,9 +198,10 @@
     applyModelVisibility();
   }
 
-  // Plot a tappable dot at each forecast point of a track. Official points are
-  // colored by category; consensus points take the consensus blue. The popup
-  // shows the point's valid date/time, forecast hour, and intensity if present.
+  // Plot a dot at each forecast point of a track. Official points are colored by
+  // category and carry a popup with the point's valid date/time, forecast hour,
+  // and intensity. Consensus points are plain blue dots (no popup) — just enough
+  // to show where the consensus lands.
   function addForecastPoints(feat, init) {
     const p = feat.properties || {};
     const coords = feat.geometry && feat.geometry.coordinates;
@@ -209,15 +210,15 @@
       if (i === 0) return; // point 0 is ~the current position (already marked)
       const tau = p.taus ? p.taus[i] : null;
       const vmax = p.vmax ? p.vmax[i] : null;
-      L.circleMarker([lat, lon], {
+      const marker = L.circleMarker([lat, lon], {
         radius: p.consensus ? 3.5 : 4,
         color: "#0b1220",
         weight: 1,
         fillColor: p.consensus ? "#66ccff" : catInfo(vmax, null).color,
         fillOpacity: 1,
-      })
-        .bindPopup(pointPopup(p.label, init, tau, vmax))
-        .addTo(ptsLayer);
+      });
+      if (!p.consensus) marker.bindPopup(pointPopup(p.label, init, tau, vmax));
+      marker.addTo(ptsLayer);
     });
   }
 
