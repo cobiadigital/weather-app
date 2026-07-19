@@ -260,7 +260,9 @@ button,
   line-height: 1;
 }
 .btn#refreshBtn {
-  width: 48px;
+  flex: none;
+  width: 44px;
+  min-height: 44px; /* match the toggle buttons it shares the row with */
   padding: 0;
 }
 .btn.spin .btn-ico {
