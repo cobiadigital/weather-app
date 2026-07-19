@@ -97,6 +97,29 @@
   let zipData = null;
   let zipLoading = null;
 
+  // --- Viewport height -----------------------------------------------------
+
+  // iOS home-screen (standalone) / fullscreen apps have a long-standing WebKit
+  // bug: the viewport that `position:fixed` + `100vh`/`100dvh` resolve against
+  // renders shorter than the real screen on first paint, leaving a blank strip
+  // (~150px) along the bottom — the dark map stops short and the control bar
+  // floats too high. `window.innerHeight`, read from JS, reports the true usable
+  // height, so we publish it as `--vh` and drive the full-screen surfaces off it
+  // (see #map / body in styles.css). Re-measure whenever the height can change.
+  function setViewportHeight() {
+    document.documentElement.style.setProperty("--vh", window.innerHeight + "px");
+  }
+
+  window.addEventListener("resize", setViewportHeight);
+  window.addEventListener("orientationchange", () => {
+    // Safari reports the pre-rotation height synchronously; re-measure after it
+    // settles so the map/controls snap to the new bottom edge.
+    setTimeout(setViewportHeight, 300);
+  });
+  // A restored-from-bfcache page (Safari back/forward) can come back with a
+  // stale height; re-measure on show.
+  window.addEventListener("pageshow", setViewportHeight);
+
   // --- Map setup -----------------------------------------------------------
 
   function initMap() {
@@ -138,12 +161,19 @@
     setStatus("Radar loaded.");
     scheduleRefresh();
 
-    // The map fills the screen via CSS inset:0. Re-measure once after layout
-    // settles, and on rotation, so Leaflet loads tiles for the full area
-    // (especially in iOS standalone mode where the size can settle late).
-    setTimeout(() => map.invalidateSize(), 0);
+    // The map is sized to var(--vh) (measured innerHeight). The real height in
+    // an iOS standalone/fullscreen app can settle a frame or two late, so
+    // re-measure and re-layout Leaflet once after load and on rotation, so the
+    // map fills the full area and loads tiles for it.
+    setTimeout(() => {
+      setViewportHeight();
+      map.invalidateSize();
+    }, 0);
     window.addEventListener("orientationchange", () => {
-      setTimeout(() => map && map.invalidateSize(), 250);
+      setTimeout(() => {
+        setViewportHeight();
+        map && map.invalidateSize();
+      }, 300);
     });
   }
 
@@ -749,6 +779,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    setViewportHeight();
     initMap();
     bind();
     // Auto-request location on first load if we don't have a saved spot;
