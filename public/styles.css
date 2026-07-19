@@ -19,9 +19,11 @@
   --warn-strong: #ef4444;
   --radius: 16px;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
-  /* Fallbacks + dynamic viewport height so the layout doesn't jump when
-     Safari's toolbars show/hide. */
-  --vh: 100vh;
+  /* Real usable viewport height. app.js overwrites this with
+     window.innerHeight (in px) so full-screen surfaces fill the screen even
+     where iOS standalone/fullscreen mis-measures the fixed viewport. Falls
+     back to the dynamic viewport height before/without the script. */
+  --vh: 100dvh;
 }
 
 * {
@@ -33,6 +35,10 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* Match the measured screen height so the fixed viewport that bottom-anchored
+     UI (.controls, attribution) resolves against reaches the true bottom edge,
+     not the short one iOS reports in standalone/fullscreen mode. */
+  height: var(--vh, 100%);
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
@@ -60,12 +66,17 @@ button,
 
 #map {
   position: fixed;
-  /* inset:0 pins the map to all four edges of the real viewport. We must NOT
-     also set an explicit height: on iOS home-screen (standalone) apps,
-     100vh/100dvh resolve to less than the true screen height, and because a
-     fixed box with top+bottom+height is over-constrained the height would win
-     and leave a blank strip along the bottom. inset:0 fills the screen. */
+  /* inset:0 pins the map to all four edges. On iOS home-screen (standalone) /
+     fullscreen apps the fixed viewport that inset:0 (and 100vh/100dvh) resolve
+     against renders shorter than the real screen on first paint, so the map
+     stops ~150px short and a blank strip shows along the bottom. --vh is set
+     from window.innerHeight in app.js (the true usable height); pinning the
+     height to it overrides that short viewport and fills the screen. The var
+     falls back to 100dvh/100vh before the script runs (or if it never does). */
   inset: 0;
+  height: 100vh;
+  height: 100dvh;
+  height: var(--vh, 100dvh);
   background: #0b1220;
   z-index: 0;
 }
