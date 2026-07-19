@@ -11,7 +11,7 @@
     <meta name="theme-color" content="#0b1220" />
     <meta
       name="description"
-      content="Atlantic & East Pacific tropical cyclone tracks, NHC forecast cone, and wind watches/warnings."
+      content="Atlantic & East Pacific tropical cyclone tracks, NHC forecast cone, wind arrival, probabilistic winds, and storm-surge inundation."
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -47,11 +47,11 @@
       }
       .back-link:active { opacity: 0.6; }
 
-      /* Legend, pinned above the bottom controls. */
+      /* Legend, pinned above the bottom controls (two toggle rows). */
       .legend {
         position: absolute;
         left: max(10px, env(safe-area-inset-left));
-        bottom: calc(env(safe-area-inset-bottom) + 128px);
+        bottom: calc(env(safe-area-inset-bottom) + 196px);
         z-index: 700;
         max-width: 62vw;
         padding: 8px 10px;
@@ -187,6 +187,10 @@
       <div class="row"><span class="line" style="border-color:#3d8bfd;border-top-width:4px"></span> TS warning</div>
       <div class="row"><span class="line" style="border-color:#ff9ec8;border-top-width:4px"></span> HU watch</div>
       <div class="row"><span class="line" style="border-color:#ff2d2d;border-top-width:4px"></span> HU warning</div>
+      <h4 style="margin-top:6px">Hazards</h4>
+      <div class="row"><span class="line" style="border-color:#111;border-top-width:2px"></span> TS wind arrival</div>
+      <div class="row"><span class="swatch" style="background:linear-gradient(90deg,#267300,#55ff00,#e69600,#e60000,#a900e6)"></span> Prob. winds</div>
+      <div class="row"><span class="swatch" style="background:#3d7cff"></span> Inundation</div>
     </aside>
 
     <!-- Slide-up storm list -->
@@ -216,6 +220,18 @@
         </button>
         <button id="refreshBtn" class="btn" type="button" aria-label="Refresh">
           <span class="btn-ico" aria-hidden="true">↻</span>
+        </button>
+      </div>
+      <!-- NHC MapServer hazard products (export image overlays; off by default). -->
+      <div class="control-row toggles">
+        <button id="arrivalBtn" class="btn toggle" type="button" aria-pressed="false" aria-label="Arrival time of tropical-storm-force winds">
+          <span>Arrival</span>
+        </button>
+        <button id="windsBtn" class="btn toggle" type="button" aria-pressed="false" aria-label="Probabilistic winds. Tap to cycle 34, 50, then 64 knots.">
+          <span id="windsBtnLabel">Winds</span>
+        </button>
+        <button id="inundationBtn" class="btn toggle" type="button" aria-pressed="false" aria-label="Storm surge inundation">
+          <span>Surge</span>
         </button>
       </div>
       <div id="status" class="status">Loading tropical cyclones…</div>
