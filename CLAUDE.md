@@ -16,9 +16,15 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   - `index.html` — markup; loads Leaflet from unpkg (with SRI hashes).
   - `styles.css` — mobile-first styles tuned for iOS Safari.
   - `app.js` — Leaflet map, radar layer, geolocation, alerts, refresh logic.
-- **`src/index.js`** — the Worker. It only handles `/api/nws/*`, proxying to
-  `https://api.weather.gov` so it can set the `User-Agent` the NWS requires
-  (browsers can't set that header) and cache responses at the edge.
+  - `tropics.html` / `tropics.js` — a second, standalone page served at
+    `/tropics` (Cloudflare `html_handling` maps `/tropics` → `tropics.html`).
+    Shows active Atlantic + East Pacific tropical cyclones with their model
+    ("spaghetti") tracks and the NHC official forecast. Reuses `styles.css` +
+    the same Leaflet/CARTO setup; page-specific CSS is inline in `tropics.html`.
+- **`src/index.js`** — the Worker. It handles `/api/nws/*` (proxying
+  `https://api.weather.gov`) and `/api/nhc/*` (the National Hurricane Center),
+  so it can set the `User-Agent` those services require (browsers can't set that
+  header) and cache responses at the edge.
 - **`wrangler.toml`** — binds `public/` as static assets and points `main` at
   the Worker.
 
@@ -41,6 +47,22 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   `goes-wv-4km-900913`).
 - **Alerts / conditions** — the NWS API (`api.weather.gov`), always reached via
   the Worker proxy at `/api/nws/...`, never called directly from the browser.
+- **Tropical cyclones (the `/tropics` page)** — the National Hurricane Center,
+  proxied via `/api/nhc/...` (never called directly from the browser):
+  - `GET /api/nhc/current` → NHC `CurrentStorms.json`, filtered to the Atlantic
+    (`al`) + East Pacific (`ep`) basins. Positions, intensity, movement, and
+    links to the official advisory/cone/discussion.
+  - `GET /api/nhc/adeck?id=<stormId>` → the storm's ATCF "a-deck"
+    (`https://ftp.nhc.noaa.gov/atcf/aid_public/a<id>.dat.gz`), a gzip'd text file
+    of every forecast aid. The Worker gunzips it (`DecompressionStream`), keeps
+    the latest synoptic cycle, and returns a **GeoJSON FeatureCollection** — one
+    `LineString` per model (GFS, ECMWF, UKMET, HWRF, HMON, consensus aids, …)
+    plus the official forecast (`OFCL`/`OFCI`, styled distinctly) — so the
+    browser needs no ZIP/KML parser. `id` is validated (`^[a-z]{2}\d{6}$`) to
+    prevent SSRF; any upstream/parse failure degrades to an empty collection so
+    the page still shows the current-position markers. We use the a-deck (plain
+    text) rather than NHC's cone/track KMZ products, which would need a ZIP+KML
+    parser (a dependency this repo avoids).
 - **ZIP centroids (location fallback)** — `public/zipcodes.json`, a static
   `{ "zip": [lat, lon] }` table (~34k US ZIPs, 4-decimal coords). `app.js`
   fetches it lazily (only when a ZIP is entered) and memoizes it, so the ~0.9 MB
