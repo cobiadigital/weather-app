@@ -162,7 +162,7 @@
   function locate() {
     if (!("geolocation" in navigator)) {
       setStatus("Location isn't available — enter a ZIP code instead.", true);
-      els.zipInput.focus();
+      revealZip();
       return;
     }
     setStatus("Finding your location…");
@@ -180,16 +180,23 @@
       },
       (err) => {
         els.locateBtn.disabled = false;
-        // Location off or denied — fall back to manual ZIP entry.
+        // Location off or denied — reveal the manual ZIP fallback.
         const msg =
           err.code === err.PERMISSION_DENIED
             ? "Location off. Enter a ZIP code, or enable location in Settings."
             : "Couldn't get your location — enter a ZIP code instead.";
         setStatus(msg, true);
-        els.zipInput.focus();
+        revealZip();
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
+  }
+
+  // The ZIP fallback stays hidden until geolocation fails; then we show it and
+  // focus the field so the user can type a ZIP right away.
+  function revealZip() {
+    els.zipForm.classList.remove("hidden");
+    els.zipInput.focus();
   }
 
   // --- ZIP-code fallback ---------------------------------------------------
