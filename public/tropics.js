@@ -164,6 +164,10 @@
     }
     if (!fc || !fc.features || !fc.features.length) return;
 
+    // Synoptic cycle the aids were initialized on (YYYYMMDDHH, UTC); combined
+    // with each point's forecast hour (tau) to label points with a valid time.
+    const init = (fc.properties && fc.properties.init) || null;
+
     fc.features.forEach((feat) => {
       const p = feat.properties || {};
       const style = p.official
@@ -185,36 +189,46 @@
       const coords = feat.geometry && feat.geometry.coordinates;
       if (coords) coords.forEach(([lon, lat]) => bounds.extend([lat, lon]));
 
-      // Official forecast: drop labeled, category-colored dots at each point.
-      if (p.official && coords) {
-        coords.forEach(([lon, lat], i) => {
-          const tau = p.taus ? p.taus[i] : null;
-          const vmax = p.vmax ? p.vmax[i] : null;
-          if (i === 0) return; // point 0 is the current position (already marked)
-          const cat = catInfo(vmax, null);
-          L.circleMarker([lat, lon], {
-            radius: 4,
-            color: "#0b1220",
-            weight: 1,
-            fillColor: cat.color,
-            fillOpacity: 1,
-          })
-            .bindTooltip(forecastLabel(storm.name, tau, vmax), { direction: "top" })
-            .addTo(ptsLayer);
-        });
-      }
+      // Drop forecast dots along the official and consensus tracks. Each has a
+      // popup with its valid date/time (see addForecastPoints). Model spaghetti
+      // is left as bare lines to keep the map readable.
+      if ((p.official || p.consensus) && coords) addForecastPoints(feat, init);
     });
 
     applyModelVisibility();
   }
 
-  function forecastLabel(name, tau, vmax) {
-    const parts = [esc(name || "Forecast")];
-    if (tau != null) {
-      parts.push(tau === 0 ? "now" : "+" + tau + "h");
-    }
-    if (vmax != null) parts.push(ktToMph(vmax) + " mph");
-    return parts.join(" · ");
+  // Plot a tappable dot at each forecast point of a track. Official points are
+  // colored by category; consensus points take the consensus blue. The popup
+  // shows the point's valid date/time, forecast hour, and intensity if present.
+  function addForecastPoints(feat, init) {
+    const p = feat.properties || {};
+    const coords = feat.geometry && feat.geometry.coordinates;
+    if (!coords) return;
+    coords.forEach(([lon, lat], i) => {
+      if (i === 0) return; // point 0 is ~the current position (already marked)
+      const tau = p.taus ? p.taus[i] : null;
+      const vmax = p.vmax ? p.vmax[i] : null;
+      L.circleMarker([lat, lon], {
+        radius: p.consensus ? 3.5 : 4,
+        color: "#0b1220",
+        weight: 1,
+        fillColor: p.consensus ? "#66ccff" : catInfo(vmax, null).color,
+        fillOpacity: 1,
+      })
+        .bindPopup(pointPopup(p.label, init, tau, vmax))
+        .addTo(ptsLayer);
+    });
+  }
+
+  function pointPopup(label, init, tau, vmax) {
+    const rows = ["<h3>" + esc(label || "Forecast") + "</h3>"];
+    const when = fmtValid(init, tau);
+    if (when) rows.push("<div>Valid " + esc(when) + "</div>");
+    if (tau != null) rows.push("<div>Forecast +" + esc(String(tau)) + " h</div>");
+    if (vmax != null)
+      rows.push("<div>" + ktToMph(vmax) + " mph (" + esc(String(vmax)) + " kt)</div>");
+    return '<div class="storm-popup">' + rows.join("") + "</div>";
   }
 
   // --- Popups & list -------------------------------------------------------
@@ -362,6 +376,33 @@
     const d = new Date(iso);
     if (isNaN(d)) return "—";
     return d.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  // A forecast point's valid time = the aid's init cycle (YYYYMMDDHH, UTC) plus
+  // its forecast hour (tau).
+  function validDate(init, tau) {
+    if (!init || tau == null || !/^\d{10}$/.test(String(init))) return null;
+    const s = String(init);
+    const t = Date.UTC(
+      +s.slice(0, 4),
+      +s.slice(4, 6) - 1,
+      +s.slice(6, 8),
+      +s.slice(8, 10)
+    );
+    const d = new Date(t + Number(tau) * 3600 * 1000);
+    return isNaN(d) ? null : d;
+  }
+
+  function fmtValid(init, tau) {
+    const d = validDate(init, tau);
+    if (!d) return null;
+    return d.toLocaleString([], {
+      weekday: "short",
       month: "short",
       day: "numeric",
       hour: "numeric",
