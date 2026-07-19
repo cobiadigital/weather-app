@@ -23,8 +23,7 @@ const NHC_ADECK_BASE = "https://ftp.nhc.noaa.gov/atcf/aid_public/";
 
 // NWS/NHC request a User-Agent that identifies the app and a contact. Update the
 // contact if you fork this. See https://www.weather.gov/documentation/services-web-api
-const USER_AGENT =
-  "weather-radar-app (https://github.com/cobiadigital/weather-app)";
+const USER_AGENT = "Bendar.app weather app (https://bendar.app)";
 
 export default {
   async fetch(request, env, ctx) {
