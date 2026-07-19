@@ -295,6 +295,16 @@ button,
 .btn.toggle[aria-pressed="true"]:active {
   background: var(--accent-press);
 }
+.btn.toggle:disabled,
+.btn.toggle[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn.toggle:disabled:active,
+.btn.toggle[aria-disabled="true"]:active {
+  transform: none;
+  background: rgba(255, 255, 255, 0.06);
+}
 
 /* --- ZIP fallback input --------------------------------------------------- */
 
@@ -494,6 +504,86 @@ button,
   line-height: 1.45;
   color: #dbe3ef;
   white-space: pre-line;
+}
+
+/* --- Settings sheet (radar products) -------------------------------------- */
+
+.settings-intro {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.settings-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-option {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.settings-option:active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.settings-option[aria-checked="true"] {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.14);
+}
+.settings-option-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-option-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.settings-option-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+.settings-check {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: transparent;
+  background: transparent;
+}
+.settings-option[aria-checked="true"] .settings-check {
+  color: #fff;
+  background: var(--accent);
+  border-color: transparent;
+}
+
+/* Gear button: slightly larger glyph so it reads at pin-btn size. */
+#settingsBtn {
+  font-size: 20px;
 }
 
 /* --- Install instructions sheet ------------------------------------------- */

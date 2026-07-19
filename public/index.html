@@ -60,6 +60,16 @@
           <span aria-hidden="true">⤴</span>
         </button>
         <button
+          id="settingsBtn"
+          class="pin-btn"
+          type="button"
+          aria-label="Radar settings"
+          aria-expanded="false"
+          aria-controls="settingsSheet"
+        >
+          <span aria-hidden="true">⚙</span>
+        </button>
+        <button
           id="alertPill"
           class="alert-pill hidden"
           type="button"
@@ -171,6 +181,75 @@
 
       <div id="status" class="status">Loading radar…</div>
     </footer>
+
+    <!-- Radar product settings (gear icon in the top bar) -->
+    <section id="settingsSheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2>Radar settings</h2>
+        <button id="settingsClose" class="icon-btn" type="button" aria-label="Close settings">✕</button>
+      </div>
+      <p class="settings-intro">Choose which radar product overlays the map.</p>
+      <div
+        id="radarProductOptions"
+        class="settings-options"
+        role="radiogroup"
+        aria-label="Radar product"
+      >
+        <button
+          type="button"
+          class="settings-option"
+          role="radio"
+          data-product="base"
+          aria-checked="true"
+        >
+          <span class="settings-option-text">
+            <span class="settings-option-title">Base Reflectivity</span>
+            <span class="settings-option-desc">NEXRAD lowest-tilt precip (live + 2h loop)</span>
+          </span>
+          <span class="settings-check" aria-hidden="true">✓</span>
+        </button>
+        <button
+          type="button"
+          class="settings-option"
+          role="radio"
+          data-product="composite"
+          aria-checked="false"
+        >
+          <span class="settings-option-text">
+            <span class="settings-option-title">Composite Reflectivity</span>
+            <span class="settings-option-desc">MRMS hybrid-scan mosaic of all tilts</span>
+          </span>
+          <span class="settings-check" aria-hidden="true">✓</span>
+        </button>
+        <button
+          type="button"
+          class="settings-option"
+          role="radio"
+          data-product="ptype"
+          aria-checked="false"
+        >
+          <span class="settings-option-text">
+            <span class="settings-option-title">Precipitation Type</span>
+            <span class="settings-option-desc">HRRR rain / snow / mix / ice colors</span>
+          </span>
+          <span class="settings-check" aria-hidden="true">✓</span>
+        </button>
+        <button
+          type="button"
+          class="settings-option"
+          role="radio"
+          data-product="eet"
+          aria-checked="false"
+        >
+          <span class="settings-option-text">
+            <span class="settings-option-title">Echo Tops</span>
+            <span class="settings-option-desc">NEXRAD storm-top height (EET)</span>
+          </span>
+          <span class="settings-check" aria-hidden="true">✓</span>
+        </button>
+      </div>
+    </section>
 
     <!-- iOS "Add to Home Screen" instructions (Safari can't prompt directly) -->
     <section id="installSheet" class="sheet hidden" aria-hidden="true">
