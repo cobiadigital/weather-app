@@ -828,7 +828,7 @@
     const data = {
       files: [file],
       title: "Bendar.app radar",
-      text: "Live weather radar — Bendar.app",
+      text: "Live weather radar — https://bendar.app",
     };
 
     try {
