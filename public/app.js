@@ -134,6 +134,64 @@
     window.visualViewport.addEventListener("resize", setViewportHeight);
   }
 
+  // --- Diagnostics ---------------------------------------------------------
+
+  // Opt-in overlay (add ?debug to the URL) that dumps the viewport/safe-area
+  // numbers so bottom-spacing issues in iOS standalone/web-app mode can be
+  // measured on a real device instead of guessed at. No-op without ?debug.
+  function initDebugOverlay() {
+    if (!/[?&]debug\b/.test(location.search)) return;
+
+    // Read the live safe-area insets via a probe whose padding is env(...).
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;pointer-events:none;" +
+      "padding:env(safe-area-inset-top) env(safe-area-inset-right) " +
+      "env(safe-area-inset-bottom) env(safe-area-inset-left);";
+    document.body.appendChild(probe);
+
+    const box = document.createElement("pre");
+    box.style.cssText =
+      "position:fixed;top:0;left:0;z-index:9999;margin:0;padding:8px 10px;" +
+      "max-width:100vw;font:11px/1.35 ui-monospace,Menlo,monospace;" +
+      "color:#0f0;background:rgba(0,0,0,.72);white-space:pre;" +
+      "pointer-events:none;text-shadow:0 1px 2px #000;";
+    document.body.appendChild(box);
+
+    const px = (v) => Math.round(v) + "px";
+    function render() {
+      const cs = getComputedStyle(probe);
+      const de = document.documentElement;
+      const controls = document.querySelector(".controls");
+      const cRect = controls && controls.getBoundingClientRect();
+      const standalone =
+        (window.matchMedia &&
+          window.matchMedia("(display-mode: standalone)").matches) ||
+        window.navigator.standalone === true;
+      box.textContent =
+        "standalone: " + standalone + "\n" +
+        "innerHeight: " + px(window.innerHeight) + "\n" +
+        "doc.clientH: " + px(de.clientHeight) + "\n" +
+        "visualVP.h : " +
+        (window.visualViewport ? px(window.visualViewport.height) : "n/a") +
+        "\n" +
+        "screen.h/av: " + px(screen.height) + " / " + px(screen.availHeight) + "\n" +
+        "--vh set to: " + (de.style.getPropertyValue("--vh") || "(unset)") + "\n" +
+        "safe T/R/B/L: " +
+        cs.paddingTop + " / " + cs.paddingRight + " / " +
+        cs.paddingBottom + " / " + cs.paddingLeft + "\n" +
+        "controls.bottom: " + (cRect ? px(cRect.bottom) : "n/a") +
+        "  gap-to-inner: " +
+        (cRect ? px(window.innerHeight - cRect.bottom) : "n/a") + "\n" +
+        "dpr: " + window.devicePixelRatio;
+    }
+    render();
+    window.addEventListener("resize", render);
+    if (window.visualViewport)
+      window.visualViewport.addEventListener("resize", render);
+    setInterval(render, 500);
+  }
+
   // --- Map setup -----------------------------------------------------------
 
   function initMap() {
@@ -791,6 +849,7 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     setViewportHeightSettled();
+    initDebugOverlay();
     initMap();
     bind();
     // Auto-request location on first load if we don't have a saved spot;
