@@ -122,6 +122,34 @@ button,
   box-shadow: 0 0 10px var(--accent);
 }
 
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Compact top-bar button that reopens the location controls once collapsed. */
+.pin-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  box-shadow: var(--shadow);
+}
+.pin-btn:active {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .alert-pill {
   pointer-events: auto;
   display: inline-flex;

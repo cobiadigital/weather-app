@@ -68,6 +68,8 @@
     zipForm: document.getElementById("zipForm"),
     zipInput: document.getElementById("zipInput"),
     zipBtn: document.getElementById("zipBtn"),
+    locateRow: document.getElementById("locateRow"),
+    locPinBtn: document.getElementById("locPinBtn"),
   };
 
   let map;
@@ -177,6 +179,7 @@
         saveLocation(lat, lon);
         loadWeather(lat, lon);
         setStatus("Centered on your location.");
+        collapseLocationControls();
       },
       (err) => {
         els.locateBtn.disabled = false;
@@ -197,6 +200,20 @@
   function revealZip() {
     els.zipForm.classList.remove("hidden");
     els.zipInput.focus();
+  }
+
+  // Once we have a location, tuck the location controls away and leave just a
+  // small pin button in the top bar to reopen them.
+  function collapseLocationControls() {
+    els.locateRow.classList.add("hidden");
+    els.zipForm.classList.add("hidden");
+    els.locPinBtn.classList.remove("hidden");
+  }
+
+  function expandLocationControls() {
+    els.locateRow.classList.remove("hidden");
+    els.locPinBtn.classList.add("hidden");
+    // The ZIP field stays hidden; it only reappears if a locate attempt fails.
   }
 
   // --- ZIP-code fallback ---------------------------------------------------
@@ -246,6 +263,7 @@
       loadWeather(lat, lon);
       els.zipInput.blur();
       setStatus("Centered on ZIP " + zip + ".");
+      collapseLocationControls();
     } catch (_) {
       setStatus("Couldn't load ZIP data. Check your connection.", true);
     } finally {
@@ -694,6 +712,7 @@
       e.preventDefault();
       goToZip();
     });
+    els.locPinBtn.addEventListener("click", expandLocationControls);
     els.playBtn.addEventListener("click", togglePlay);
     els.loopScrub.addEventListener("input", onScrub);
     els.installBtn.addEventListener("click", onInstall);
@@ -724,7 +743,9 @@
   document.addEventListener("DOMContentLoaded", () => {
     initMap();
     bind();
-    // Auto-request location on first load if we don't have a saved spot.
+    // Auto-request location on first load if we don't have a saved spot;
+    // otherwise we already have a location, so collapse the controls.
     if (!loadLocation()) locate();
+    else collapseLocationControls();
   });
 })();

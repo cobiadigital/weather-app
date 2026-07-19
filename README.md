@@ -16,9 +16,12 @@ All data is public and comes from the **National Weather Service**:
 ## Features
 
 - Full-screen dark map with a live radar overlay
-- **My location** button (uses your device GPS) and remembers your last spot
+- **My location** button (uses your device GPS) and remembers your last spot.
+  Once a location is set, the location controls collapse to a small pin in the
+  top bar (tap it to re-center or change location)
 - **ZIP-code fallback** for when location services are off — an offline lookup
-  table (`public/zipcodes.json`) maps the ZIP to a lat/lon and recenters the map
+  table (`public/zipcodes.json`) maps the ZIP to a lat/lon and recenters the
+  map. It stays hidden until a locate attempt fails
 - Radar **opacity slider** and manual **refresh**; radar auto-refreshes every 5 min
 - **Loop 2h** — animate the last 2 hours of radar with a play/pause + scrubber
   and a timestamp, so you can see where the weather is heading
