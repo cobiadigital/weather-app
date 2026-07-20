@@ -587,6 +587,34 @@ button,
   font-size: 20px;
 }
 
+/* Navigation row under the radar-product list (e.g. Tropics). */
+.settings-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  text-decoration: none;
+  text-align: left;
+  font: inherit;
+  box-sizing: border-box;
+}
+.settings-link:active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.settings-link-chevron {
+  flex: none;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--muted);
+}
+
 /* --- Install instructions sheet ------------------------------------------- */
 
 .install-steps p {
