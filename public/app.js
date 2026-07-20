@@ -2,8 +2,9 @@
    Bendar.app — front-end logic.
 
    - Leaflet map with an OpenStreetMap base layer.
-   - NEXRAD radar overlay from the Iowa Environmental Mesonet (IEM), which
-     composites the National Weather Service's NEXRAD Level III (N0Q) product.
+   - Radar overlays from the Iowa Environmental Mesonet (IEM): NEXRAD base
+     reflectivity / echo tops, MRMS composite reflectivity, and HRRR precip
+     type. Product choice lives in the gear-icon settings sheet.
    - Active weather alerts + nearest-station conditions via the NWS API,
      proxied through this Worker at /api/nws/* (see src/index.js).
 ---------------------------------------------------------------------------- */
@@ -11,17 +12,54 @@
 (function () {
   "use strict";
 
-  // IEM NEXRAD base-reflectivity composite (EPSG:3857 / web-mercator tiles).
-  // Works as a standard {z}/{x}/{y} tile layer. Refreshed by IEM ~every 5 min.
-  const RADAR_TILE_URL =
-    "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png";
+  // IEM tile cache root. Layer names are product-specific (see RADAR_PRODUCTS).
+  // All are EPSG:3857 / web-mercator {z}/{x}/{y} PNGs. See mesonet…/ogc/.
+  const IEM_TILE_ROOT =
+    "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/";
 
-  // Time-enabled NEXRAD N0Q WMS (IEM "time machine"). Serves any 5-minute
-  // composite from the archive via the WMS TIME parameter, which is how we
-  // build the last-4-hours loop. See mesonet.agron.iastate.edu/ogc/.
-  const RADAR_WMS_URL =
-    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi";
-  const RADAR_WMS_LAYER = "nexrad-n0q-wmst";
+  // Selectable radar products. Only "base" has a time-enabled WMS for the 2h
+  // loop; the others are live-only tiles (Loop button is disabled for them).
+  const RADAR_PRODUCTS = {
+    base: {
+      id: "base",
+      label: "Base Reflectivity",
+      layer: "nexrad-n0q-900913",
+      attribution:
+        'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
+      // Time-enabled NEXRAD N0Q WMS (IEM "time machine") for the last-2h loop.
+      loop: {
+        wmsUrl: "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi",
+        wmsLayer: "nexrad-n0q-wmst",
+      },
+    },
+    composite: {
+      id: "composite",
+      label: "Composite Reflectivity",
+      // MRMS Hybrid-Scan Reflectivity (SeamlessHSR) — multi-tilt composite.
+      layer: "q2-hsr-900913",
+      attribution:
+        'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NOAA MRMS',
+      loop: null,
+    },
+    ptype: {
+      id: "ptype",
+      label: "Precipitation Type",
+      // HRRR 0-hour reflectivity colored by precip type (rain/snow/mix/ice).
+      layer: "hrrr::REFP-F0000-0",
+      attribution:
+        'Precip type: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NOAA HRRR',
+      loop: null,
+    },
+    eet: {
+      id: "eet",
+      label: "Echo Tops",
+      layer: "nexrad-eet-900913",
+      attribution:
+        'Echo tops: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
+      loop: null,
+    },
+  };
+  const DEFAULT_PRODUCT = "base";
 
   // GOES East infrared composite from IEM. This is *satellite* cloud imagery
   // (NOT part of the NEXRAD radar product) — infrared shows cloud cover day and
@@ -33,6 +71,7 @@
   const LOCATED_ZOOM = 9;
   const REFRESH_MS = 5 * 60 * 1000; // auto-refresh radar every 5 minutes
   const STORE_KEY = "radar.lastLocation";
+  const PRODUCT_STORE_KEY = "radar.product";
   const SHARE_URL = "https://bendar.app";
   const SHARE_TEXT = "Live weather radar — " + SHARE_URL;
 
@@ -61,6 +100,10 @@
     cloudsBtn: document.getElementById("cloudsBtn"),
     loopBtn: document.getElementById("loopBtn"),
     shareBtn: document.getElementById("shareBtn"),
+    settingsBtn: document.getElementById("settingsBtn"),
+    settingsSheet: document.getElementById("settingsSheet"),
+    settingsClose: document.getElementById("settingsClose"),
+    radarProductOptions: document.getElementById("radarProductOptions"),
     installBtn: document.getElementById("installBtn"),
     installSheet: document.getElementById("installSheet"),
     installClose: document.getElementById("installClose"),
@@ -81,6 +124,7 @@
   let cloudLayer; // GOES satellite cloud layer (optional)
   let meMarker;
   let refreshTimer;
+  let radarProductId = loadProductId(); // selected RADAR_PRODUCTS key
 
   // Radar-loop state.
   let loopOn = false;
@@ -191,14 +235,9 @@
       }
     ).addTo(map);
 
-    radarLayer = L.tileLayer(RADAR_TILE_URL, {
-      opacity: sliderToOpacity(els.opacity.value),
-      attribution:
-        'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
-      zIndex: 5,
-      maxZoom: 15,
-      crossOrigin: "anonymous",
-    }).addTo(map);
+    radarLayer = buildRadarLayer().addTo(map);
+    syncProductUI();
+    syncLoopAvailability();
 
     if (saved) {
       setMeMarker(saved.lat, saved.lon);
@@ -236,17 +275,131 @@
     });
   }
 
+  // --- Radar products ------------------------------------------------------
+
+  function currentProduct() {
+    return RADAR_PRODUCTS[radarProductId] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+  }
+
+  function radarTileUrl(product, bustCache) {
+    const p = product || currentProduct();
+    let url = IEM_TILE_ROOT + p.layer + "/{z}/{x}/{y}.png";
+    if (bustCache) url += "?_=" + Date.now();
+    return url;
+  }
+
+  function buildRadarLayer() {
+    const p = currentProduct();
+    return L.tileLayer(radarTileUrl(p, false), {
+      opacity: sliderToOpacity(els.opacity.value),
+      attribution: p.attribution,
+      zIndex: 5,
+      maxZoom: 15,
+      crossOrigin: "anonymous",
+    });
+  }
+
+  function loadProductId() {
+    try {
+      const id = localStorage.getItem(PRODUCT_STORE_KEY);
+      if (id && RADAR_PRODUCTS[id]) return id;
+    } catch (_) {
+      /* private mode / storage disabled — ignore */
+    }
+    return DEFAULT_PRODUCT;
+  }
+
+  function saveProductId(id) {
+    try {
+      localStorage.setItem(PRODUCT_STORE_KEY, id);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function syncProductUI() {
+    const id = currentProduct().id;
+    if (!els.radarProductOptions) return;
+    els.radarProductOptions.querySelectorAll("[data-product]").forEach((btn) => {
+      const on = btn.getAttribute("data-product") === id;
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+    });
+  }
+
+  // Loop 2h needs a time-enabled WMS; only Base Reflectivity has one today.
+  function syncLoopAvailability() {
+    const canLoop = !!currentProduct().loop;
+    els.loopBtn.disabled = !canLoop;
+    els.loopBtn.setAttribute("aria-disabled", canLoop ? "false" : "true");
+    els.loopBtn.title = canLoop
+      ? "Animate the last 2 hours"
+      : "Loop is only available for Base Reflectivity";
+  }
+
+  function setRadarProduct(id) {
+    if (!RADAR_PRODUCTS[id] || id === radarProductId) {
+      closeSettingsSheet();
+      return;
+    }
+
+    // Tear down an active loop without restoring the old live layer — we rebuild
+    // the live layer for the new product below.
+    if (loopOn) {
+      loopOn = false;
+      loopReady = false;
+      pauseLoop();
+      clearTimeout(loopSafety);
+      setToggle(els.loopBtn, false);
+      els.loopBar.classList.add("hidden");
+      els.playBtn.disabled = false;
+      els.loopScrub.disabled = false;
+      loopLayers.forEach((layer) => map.removeLayer(layer));
+      loopLayers = [];
+    }
+
+    radarProductId = id;
+    saveProductId(id);
+    syncProductUI();
+    syncLoopAvailability();
+
+    const p = currentProduct();
+    const next = buildRadarLayer();
+    if (radarLayer) map.removeLayer(radarLayer);
+    radarLayer = next.addTo(map);
+    closeSettingsSheet();
+    setStatus(p.label + " loaded.");
+  }
+
+  function openSettingsSheet() {
+    closeSheet();
+    closeInstallSheet();
+    els.settingsSheet.classList.remove("hidden");
+    els.settingsSheet.setAttribute("aria-hidden", "false");
+    els.settingsBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function closeSettingsSheet() {
+    els.settingsSheet.classList.add("hidden");
+    els.settingsSheet.setAttribute("aria-hidden", "true");
+    els.settingsBtn.setAttribute("aria-expanded", "false");
+  }
+
+  function toggleSettingsSheet() {
+    if (els.settingsSheet.classList.contains("hidden")) openSettingsSheet();
+    else closeSettingsSheet();
+  }
+
   // --- Radar refresh -------------------------------------------------------
 
   // Re-request the radar tiles by bumping a cache-busting param so we pull the
-  // latest NEXRAD frame. Leaflet keeps the old tiles visible until the new
-  // ones load, so there's no flash.
+  // latest frame. Leaflet keeps the old tiles visible until the new ones load,
+  // so there's no flash.
   function refreshRadar(userInitiated) {
     if (!radarLayer || loopOn) return; // the loop drives its own frames
-    radarLayer.setUrl(RADAR_TILE_URL + "?_=" + Date.now());
+    radarLayer.setUrl(radarTileUrl(currentProduct(), true));
     if (userInitiated) {
       els.refreshBtn.classList.add("spin");
-      setStatus("Radar updated " + timeNow() + ".");
+      setStatus(currentProduct().label + " updated " + timeNow() + ".");
       setTimeout(() => els.refreshBtn.classList.remove("spin"), 800);
     }
   }
@@ -501,6 +654,8 @@
 
   function openSheet() {
     if (els.alertPill.classList.contains("hidden")) return;
+    closeSettingsSheet();
+    closeInstallSheet();
     els.alertSheet.classList.remove("hidden");
     els.alertSheet.setAttribute("aria-hidden", "false");
     els.alertPill.setAttribute("aria-expanded", "true");
@@ -579,10 +734,20 @@
   // --- Radar loop (last 4 hours) -------------------------------------------
 
   function toggleLoop() {
+    if (!currentProduct().loop) {
+      setStatus("Loop is only available for Base Reflectivity.");
+      return;
+    }
     loopOn ? stopLoop() : startLoop();
   }
 
   function startLoop() {
+    const loopCfg = currentProduct().loop;
+    if (!loopCfg) {
+      setStatus("Loop is only available for Base Reflectivity.");
+      return;
+    }
+
     loopOn = true;
     loopReady = false;
     loopLoaded = 0;
@@ -601,6 +766,7 @@
 
     const op = sliderToOpacity(els.opacity.value);
     const total = loopFrames.length;
+    const attr = currentProduct().attribution;
 
     // Anti-strobe strategy: rather than swapping the TIME param on a single
     // layer (which re-fetches its tiles every frame and flashes blank while
@@ -609,8 +775,8 @@
     // just flipping opacity between already-loaded layers, so a frame never
     // disappears mid-loop.
     loopLayers = loopFrames.map((frame, i) => {
-      const layer = L.tileLayer.wms(RADAR_WMS_URL, {
-        layers: RADAR_WMS_LAYER,
+      const layer = L.tileLayer.wms(loopCfg.wmsUrl, {
+        layers: loopCfg.wmsLayer,
         format: "image/png",
         transparent: true,
         time: isoUTC(frame),
@@ -622,10 +788,7 @@
         updateWhenIdle: true, // don't refetch every frame while panning
         keepBuffer: 0, // 48 layers — keep each one's memory footprint small
         // One attribution entry is plenty (Leaflet de-dupes identical text).
-        attribution:
-          i === 0
-            ? 'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD'
-            : undefined,
+        attribution: i === 0 ? attr : undefined,
       });
       layer.once("load", () => onFrameLoaded(total));
       return layer;
@@ -680,7 +843,7 @@
       radarLayer.addTo(map);
       refreshRadar(false);
     }
-    setStatus("Showing live radar.");
+    setStatus("Showing live " + currentProduct().label + ".");
   }
 
   // Build 12 frame timestamps at 10-minute spacing, ending one lag-step back
@@ -798,6 +961,8 @@
   }
 
   function openInstallSheet() {
+    closeSheet();
+    closeSettingsSheet();
     els.installSheet.classList.remove("hidden");
     els.installSheet.setAttribute("aria-hidden", "false");
   }
@@ -1054,6 +1219,13 @@
     els.cloudsBtn.addEventListener("click", toggleClouds);
     els.loopBtn.addEventListener("click", toggleLoop);
     els.shareBtn.addEventListener("click", shareView);
+    els.settingsBtn.addEventListener("click", toggleSettingsSheet);
+    els.settingsClose.addEventListener("click", closeSettingsSheet);
+    els.radarProductOptions.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-product]");
+      if (!btn || !els.radarProductOptions.contains(btn)) return;
+      setRadarProduct(btn.getAttribute("data-product"));
+    });
     els.zipForm.addEventListener("submit", (e) => {
       e.preventDefault();
       goToZip();
