@@ -33,8 +33,11 @@
     <style>
       .tropics-title .dot { background: #ff5a1f; }
 
-      /* Back-to-radar link in the top bar. */
+      /* Back-to-radar link in the top bar.
+         Topbar itself is pointer-events:none so map gestures pass through;
+         re-enable hits on this control (same pattern as .pin-btn / .alert-pill). */
       .back-link {
+        pointer-events: auto;
         display: inline-flex;
         align-items: center;
         gap: 4px;
