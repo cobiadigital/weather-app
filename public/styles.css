@@ -262,7 +262,8 @@ button,
   font-size: 18px;
   line-height: 1;
 }
-.btn#refreshBtn {
+.btn#refreshBtn,
+.btn#installBtn {
   flex: none;
   width: 44px;
   min-height: 44px; /* match the toggle buttons it shares the row with */
@@ -272,8 +273,8 @@ button,
   animation: spin 0.8s linear infinite;
 }
 
-/* Toggle buttons (Clouds / Loop / Install) share the row evenly.
-   Share lives in the top bar next to Alerts. */
+/* Toggle buttons (Clouds / Loop) share the row evenly.
+   Install is icon-only next to Refresh. Share lives in the top bar. */
 .toggles {
   gap: 8px;
 }
