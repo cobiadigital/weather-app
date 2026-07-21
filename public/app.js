@@ -118,6 +118,9 @@
     installBtn: document.getElementById("installBtn"),
     installSheet: document.getElementById("installSheet"),
     installClose: document.getElementById("installClose"),
+    infoBtn: document.getElementById("infoBtn"),
+    infoSheet: document.getElementById("infoSheet"),
+    infoClose: document.getElementById("infoClose"),
     loopBar: document.getElementById("loopBar"),
     playBtn: document.getElementById("playBtn"),
     loopScrub: document.getElementById("loopScrub"),
@@ -391,6 +394,7 @@
   function openSettingsSheet() {
     closeSheet();
     closeInstallSheet();
+    closeInfoSheet();
     els.settingsSheet.classList.remove("hidden");
     els.settingsSheet.setAttribute("aria-hidden", "false");
     els.settingsBtn.setAttribute("aria-expanded", "true");
@@ -674,6 +678,7 @@
     if (els.alertPill.classList.contains("hidden")) return;
     closeSettingsSheet();
     closeInstallSheet();
+    closeInfoSheet();
     els.alertSheet.classList.remove("hidden");
     els.alertSheet.setAttribute("aria-hidden", "false");
     els.alertPill.setAttribute("aria-expanded", "true");
@@ -1093,6 +1098,7 @@
   function openInstallSheet() {
     closeSheet();
     closeSettingsSheet();
+    closeInfoSheet();
     els.installSheet.classList.remove("hidden");
     els.installSheet.setAttribute("aria-hidden", "false");
   }
@@ -1100,6 +1106,28 @@
   function closeInstallSheet() {
     els.installSheet.classList.add("hidden");
     els.installSheet.setAttribute("aria-hidden", "true");
+  }
+
+  // --- About / info sheet (tap the Bendar.app logo) ------------------------
+
+  function toggleInfoSheet() {
+    if (els.infoSheet.classList.contains("hidden")) openInfoSheet();
+    else closeInfoSheet();
+  }
+
+  function openInfoSheet() {
+    closeSheet();
+    closeSettingsSheet();
+    closeInstallSheet();
+    els.infoSheet.classList.remove("hidden");
+    els.infoSheet.setAttribute("aria-hidden", "false");
+    els.infoBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function closeInfoSheet() {
+    els.infoSheet.classList.add("hidden");
+    els.infoSheet.setAttribute("aria-hidden", "true");
+    els.infoBtn.setAttribute("aria-expanded", "false");
   }
 
   // --- Share current view as an image --------------------------------------
@@ -1365,6 +1393,8 @@
     els.loopScrub.addEventListener("input", onScrub);
     els.installBtn.addEventListener("click", onInstall);
     els.installClose.addEventListener("click", closeInstallSheet);
+    els.infoBtn.addEventListener("click", toggleInfoSheet);
+    els.infoClose.addEventListener("click", closeInfoSheet);
 
     // Chrome/Android: capture the native install prompt for our own button.
     window.addEventListener("beforeinstallprompt", (e) => {

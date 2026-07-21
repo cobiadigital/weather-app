@@ -38,10 +38,17 @@
 
     <!-- Top bar: title + share + active-alert pill -->
     <header class="topbar">
-      <div class="title">
+      <button
+        id="infoBtn"
+        class="title"
+        type="button"
+        aria-label="About Bendar.app"
+        aria-expanded="false"
+        aria-controls="infoSheet"
+      >
         <span class="dot" aria-hidden="true"></span>
         Bendar.app
-      </div>
+      </button>
       <div class="top-actions">
         <button
           id="locPinBtn"
@@ -272,6 +279,45 @@
           <li>Scroll down and choose <strong>Add to Home Screen</strong>.</li>
           <li>Tap <strong>Add</strong> — the radar icon appears on your home screen.</li>
         </ol>
+      </div>
+    </section>
+
+    <!-- About / support (tap the Bendar.app logo) -->
+    <section id="infoSheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2>About Bendar.app</h2>
+        <button id="infoClose" class="icon-btn" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="info-body">
+        <p>Developed by Ben Brenner with Claude on Cloudflare.</p>
+        <p>If you enjoy this app, please consider pitching in a few dollars to help pay for server costs.</p>
+        <div class="info-links">
+          <a class="info-link" href="https://ko-fi.com/benbrenner" target="_blank" rel="noopener">
+            <span class="info-link-ico" aria-hidden="true">☕</span>
+            <span class="info-link-text">
+              <span class="info-link-title">Support on Ko-fi</span>
+              <span class="info-link-desc">ko-fi.com/benbrenner</span>
+            </span>
+            <span class="info-link-chevron" aria-hidden="true">›</span>
+          </a>
+          <a class="info-link" href="https://benbrenner.com" target="_blank" rel="noopener">
+            <span class="info-link-ico" aria-hidden="true">🌐</span>
+            <span class="info-link-text">
+              <span class="info-link-title">More info &amp; other apps</span>
+              <span class="info-link-desc">benbrenner.com</span>
+            </span>
+            <span class="info-link-chevron" aria-hidden="true">›</span>
+          </a>
+          <a class="info-link" href="https://github.com/cobiadigital/weather-app" target="_blank" rel="noopener">
+            <span class="info-link-ico" aria-hidden="true">⌥</span>
+            <span class="info-link-text">
+              <span class="info-link-title">Source on GitHub</span>
+              <span class="info-link-desc">github.com/cobiadigital/weather-app</span>
+            </span>
+            <span class="info-link-chevron" aria-hidden="true">›</span>
+          </a>
+        </div>
       </div>
     </section>
 

@@ -130,13 +130,26 @@ button,
 }
 
 .title {
-  display: flex;
+  /* A button, but it reads as the plain wordmark. pointer-events:auto opts it
+     back in over the gradient topbar (which is pointer-events:none). */
+  pointer-events: auto;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin: 0;
+  padding: 4px 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
   font-weight: 700;
   font-size: 17px;
   letter-spacing: 0.2px;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.title:active {
+  opacity: 0.7;
 }
 
 .title .dot {
@@ -642,6 +655,63 @@ button,
   color: var(--accent);
   font-size: 17px;
   vertical-align: -2px;
+}
+
+/* --- About / info sheet --------------------------------------------------- */
+
+.info-body p {
+  margin: 0 0 12px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #dbe3ef;
+}
+.info-links {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+.info-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  text-decoration: none;
+  box-sizing: border-box;
+}
+.info-link:active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.info-link-ico {
+  flex: none;
+  font-size: 20px;
+  line-height: 1;
+}
+.info-link-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.info-link-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.info-link-desc {
+  font-size: 13px;
+  color: var(--muted);
+}
+.info-link-chevron {
+  flex: none;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--muted);
 }
 
 /* --- Location marker ------------------------------------------------------ */
