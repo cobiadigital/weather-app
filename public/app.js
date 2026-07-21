@@ -75,16 +75,23 @@
   const SHARE_URL = "https://bendar.app";
   const SHARE_TEXT = "Live weather radar — " + SHARE_URL;
 
-  // Radar loop: 2 hours of frames at 10-minute spacing (12 frames), advanced
-  // roughly twice a second. IEM composites lag real time by a few minutes, so
-  // we end the loop one step back from "now" to avoid requesting a blank frame.
+  // Radar loop: 2 hours of frames at the composites' native 5-minute spacing
+  // (24 frames), advanced roughly twice a second. IEM composites lag real time
+  // by a few minutes, so we end the loop one step back from "now" to avoid
+  // requesting a blank frame.
   const LOOP_HOURS = 2;
-  const LOOP_STEP_MIN = 10;
-  const LOOP_FRAME_COUNT = (LOOP_HOURS * 60) / LOOP_STEP_MIN; // 12
+  const LOOP_STEP_MIN = 5;
+  const LOOP_FRAME_COUNT = (LOOP_HOURS * 60) / LOOP_STEP_MIN; // 24
   const LOOP_LAG_MIN = 5;
+  // Frames don't all have to load before the loop plays. They arrive in dyadic
+  // "waves": every 8th frame first — a coarse, wide-spaced loop you can watch
+  // almost immediately — then every 4th, 2nd, and finally all 24, each wave
+  // doubling the temporal resolution down to the native 5-minute spacing. So
+  // you see motion after ~3 frames instead of waiting on all 24.
+  const LOOP_STRIDES = [8, 4, 2, 1];
   const LOOP_PLAY_MS = 500; // ms per frame while playing
   const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
-  const LOOP_SAFETY_MS = 25000; // start playing even if some frames stall loading
+  const LOOP_SAFETY_MS = 25000; // play the coarse wave even if a frame stalls
 
   const els = {
     status: document.getElementById("status"),
@@ -129,13 +136,19 @@
   // Radar-loop state.
   let loopOn = false;
   let loopPlaying = false;
-  let loopReady = false; // true once frames are preloaded
+  let loopReady = false; // true once the first (coarse) wave is ready to play
   let loopTimer;
-  let loopSafety; // fallback timer so a stalled frame can't hang preload
-  let loopLoaded = 0; // how many frame layers have finished loading
+  let loopSafety; // fallback timer so a stalled frame can't hang the first wave
   let loopLayers = []; // one WMS tile layer per frame, parallel to loopFrames
   let loopFrames = []; // array of Date objects, oldest -> newest
   let loopIndex = 0;
+  // Progressive (dyadic) preload state.
+  let loopWaves = []; // arrays of frame indices, coarsest -> finest
+  let frameWave = []; // frame index -> which wave it belongs to
+  let loopWaveAdded = []; // wave -> have its layers been added to the map yet?
+  let loopWavePromoted = []; // wave -> has it been folded into the animation?
+  let loopLoadedSet = new Set(); // frame indices whose tiles have finished
+  let loopActive = []; // sorted frame indices currently in the animation
 
   // Deferred PWA install prompt (Chrome/Android). Null on iOS Safari.
   let deferredInstallPrompt = null;
@@ -750,10 +763,11 @@
 
     loopOn = true;
     loopReady = false;
-    loopLoaded = 0;
+    loopLoadedSet = new Set();
+    loopActive = [];
     setToggle(els.loopBtn, true);
     els.loopBar.classList.remove("hidden");
-    // Controls stay inert until the frames are preloaded.
+    // Controls stay inert until the first coarse wave is ready.
     els.playBtn.disabled = true;
     els.loopScrub.disabled = true;
 
@@ -768,12 +782,22 @@
     const total = loopFrames.length;
     const attr = currentProduct().attribution;
 
+    // Work out the dyadic waves and each frame's wave, so we can load the
+    // coarse frames first and reveal a watchable loop before the rest arrive.
+    loopWaves = computeLoopWaves(total);
+    loopWaveAdded = loopWaves.map(() => false);
+    loopWavePromoted = loopWaves.map(() => false);
+    frameWave = new Array(total);
+    loopWaves.forEach((wave, w) => wave.forEach((i) => (frameWave[i] = w)));
+
     // Anti-strobe strategy: rather than swapping the TIME param on a single
     // layer (which re-fetches its tiles every frame and flashes blank while
-    // they load), build one tile layer per frame up front. They're all added
-    // at opacity 0 so their tiles preload in the background; animating is then
-    // just flipping opacity between already-loaded layers, so a frame never
-    // disappears mid-loop.
+    // they load), build one tile layer per frame. They're all hidden
+    // (opacity 0) except the newest, so animating is just flipping opacity
+    // between already-loaded layers and a frame never disappears mid-loop.
+    // Layers are added to the map wave-by-wave (see addWave/promoteWave), not
+    // all at once, so the browser spends its first connections on the coarse
+    // frames and the loop can start before the finer waves finish.
     loopLayers = loopFrames.map((frame, i) => {
       const layer = L.tileLayer.wms(loopCfg.wmsUrl, {
         layers: loopCfg.wmsLayer,
@@ -786,36 +810,99 @@
         maxZoom: 15,
         crossOrigin: "anonymous", // keep loop frames canvas-exportable (Share)
         updateWhenIdle: true, // don't refetch every frame while panning
-        keepBuffer: 0, // 48 layers — keep each one's memory footprint small
+        keepBuffer: 0, // 24 layers — keep each one's memory footprint small
         // One attribution entry is plenty (Leaflet de-dupes identical text).
         attribution: i === 0 ? attr : undefined,
       });
-      layer.once("load", () => onFrameLoaded(total));
+      layer.once("load", () => onFrameLoaded(i));
       return layer;
     });
-    loopLayers.forEach((layer) => layer.addTo(map));
+
+    // Kick off the coarsest wave; each wave adds the next, finer one as it lands.
+    addWave(0);
 
     els.loopScrub.max = String(total - 1);
     els.loopScrub.value = String(loopIndex);
     updateLoopLabel();
     setStatus("Loading radar loop… 0%");
 
-    // Safety net: if a frame's tiles never finish (server hiccup), start anyway.
+    // Safety net: if a coarse frame's tiles never finish (server hiccup), play
+    // with whatever's loaded so far rather than hanging.
     clearTimeout(loopSafety);
-    loopSafety = setTimeout(markLoopReady, LOOP_SAFETY_MS);
+    loopSafety = setTimeout(onPreloadTimeout, LOOP_SAFETY_MS);
   }
 
-  function onFrameLoaded(total) {
+  // Split the frames into dyadic refinement waves: at each stride, take frames
+  // newest-first, skipping any a coarser wave already claimed. Coarsest first,
+  // so waves[0] is every 8th frame and the last wave fills in the rest.
+  function computeLoopWaves(n) {
+    const waves = [];
+    const seen = new Set();
+    for (const stride of LOOP_STRIDES) {
+      const wave = [];
+      for (let i = n - 1; i >= 0; i -= stride) {
+        if (!seen.has(i)) {
+          seen.add(i);
+          wave.push(i);
+        }
+      }
+      if (wave.length) waves.push(wave);
+    }
+    return waves;
+  }
+
+  // Add a wave's layers to the map — which is what actually starts their tile
+  // requests. No-op for an already-added or out-of-range wave.
+  function addWave(w) {
+    if (w >= loopWaves.length || loopWaveAdded[w]) return;
+    loopWaveAdded[w] = true;
+    loopWaves[w].forEach((i) => loopLayers[i].addTo(map));
+  }
+
+  // A wave has fully loaded: fold its frames into the animating set (which
+  // doubles the loop's temporal resolution) and start loading the next one.
+  function promoteWave(w) {
+    if (loopWavePromoted[w] || !loopOn) return;
+    loopWavePromoted[w] = true;
+    const merged = new Set(loopActive);
+    loopWaves[w].forEach((i) => merged.add(i));
+    loopActive = Array.from(merged).sort((a, b) => a - b);
+    addWave(w + 1);
+    if (w === 0) markLoopReady();
+  }
+
+  function onFrameLoaded(i) {
     if (!loopOn) return; // loop was stopped mid-preload
-    loopLoaded++;
+    loopLoadedSet.add(i);
     if (!loopReady) {
-      const pct = Math.round((loopLoaded / total) * 100);
+      const first = loopWaves[0];
+      const have = first.filter((k) => loopLoadedSet.has(k)).length;
+      const pct = Math.round((have / first.length) * 100);
       setStatus("Loading radar loop… " + pct + "%");
     }
-    if (loopLoaded >= total) markLoopReady();
+    const w = frameWave[i];
+    if (
+      w != null &&
+      !loopWavePromoted[w] &&
+      loopWaves[w].every((k) => loopLoadedSet.has(k))
+    ) {
+      promoteWave(w);
+    }
   }
 
-  // Preload finished (or timed out) — enable the controls and start playing.
+  // The coarse wave stalled — play whatever coarse frames have loaded so far
+  // and let the finer waves keep filling in behind the running animation.
+  function onPreloadTimeout() {
+    if (loopReady || !loopOn) return;
+    const loaded = loopWaves[0].filter((i) => loopLoadedSet.has(i));
+    const set = new Set(loaded.length ? loaded : [loopFrames.length - 1]);
+    loopActive = Array.from(set).sort((a, b) => a - b);
+    loopWavePromoted[0] = true;
+    addWave(1);
+    markLoopReady();
+  }
+
+  // First wave is ready (or timed out) — enable the controls and start playing.
   function markLoopReady() {
     if (loopReady || !loopOn) return;
     loopReady = true;
@@ -837,6 +924,12 @@
 
     loopLayers.forEach((layer) => map.removeLayer(layer));
     loopLayers = [];
+    loopWaves = [];
+    frameWave = [];
+    loopWaveAdded = [];
+    loopWavePromoted = [];
+    loopLoadedSet = new Set();
+    loopActive = [];
 
     // Restore the live radar.
     if (radarLayer) {
@@ -846,8 +939,9 @@
     setStatus("Showing live " + currentProduct().label + ".");
   }
 
-  // Build 12 frame timestamps at 10-minute spacing, ending one lag-step back
-  // from now (snapped down to the 10-minute grid the composites are built on).
+  // Build 24 frame timestamps at 5-minute spacing (the native composite
+  // cadence), ending one lag-step back from now (snapped down to the 5-minute
+  // grid the composites are built on).
   function buildLoopFrames() {
     const now = Date.now();
     const step = LOOP_STEP_MIN * 60 * 1000;
@@ -859,15 +953,34 @@
   }
 
   // Reveal frame i by flipping opacity — the layers are already loaded, so
-  // this is instant and never blanks the map.
+  // this is instant and never blanks the map. i is snapped to the nearest
+  // frame currently in the animating set, since the coarse waves leave gaps.
   function showLoopFrame(i) {
+    const target = nearestActive(i);
+    if (target == null) return;
     const prev = loopIndex;
-    loopIndex = Math.max(0, Math.min(loopLayers.length - 1, i));
+    loopIndex = target;
     const op = sliderToOpacity(els.opacity.value);
     if (loopLayers[prev] && prev !== loopIndex) loopLayers[prev].setOpacity(0);
     if (loopLayers[loopIndex]) loopLayers[loopIndex].setOpacity(op);
     els.loopScrub.value = String(loopIndex);
     updateLoopLabel();
+  }
+
+  // Nearest frame index that's actually in the current animating set (so
+  // scrubbing to a not-yet-loaded slot lands on the closest loaded frame).
+  function nearestActive(i) {
+    if (!loopActive.length) return null;
+    let best = loopActive[0];
+    let bestDist = Infinity;
+    for (const a of loopActive) {
+      const dist = Math.abs(a - i);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = a;
+      }
+    }
+    return best;
   }
 
   function playLoop() {
@@ -879,10 +992,13 @@
     // Recursive setTimeout (not setInterval) so we can linger on the newest
     // frame before wrapping back to the start.
     const tick = () => {
-      let next = loopIndex + 1;
-      if (next >= loopLayers.length) next = 0;
-      showLoopFrame(next);
-      const onNewest = loopIndex === loopLayers.length - 1;
+      // Step within the active set, which grows as finer waves land — so the
+      // loop naturally densifies mid-play without ever hitting a blank frame.
+      const pos = loopActive.indexOf(loopIndex);
+      let nextPos = pos + 1;
+      if (nextPos >= loopActive.length) nextPos = 0;
+      showLoopFrame(loopActive[nextPos]);
+      const onNewest = loopIndex === loopFrames.length - 1;
       loopTimer = setTimeout(tick, onNewest ? LOOP_END_DWELL_MS : LOOP_PLAY_MS);
     };
     loopTimer = setTimeout(tick, LOOP_PLAY_MS);

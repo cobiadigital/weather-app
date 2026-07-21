@@ -36,10 +36,17 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
 - **Radar loop (last 2 h)** — IEM's time-enabled NEXRAD WMS
   `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
   `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
-  `app.js` preloads one `L.tileLayer.wms` per 10-minute frame (12 layers, all
-  added at opacity 0) and animates by toggling opacity between already-loaded
-  layers, so frames don't flash blank while tiles load. It's a different
-  endpoint than the live tile cache above.
+  `app.js` builds one `L.tileLayer.wms` per 5-minute frame (24 layers, all at
+  opacity 0 except the visible one) and animates by toggling opacity between
+  already-loaded layers, so frames don't flash blank while tiles load. Frames
+  are loaded **progressively in dyadic waves** (`LOOP_STRIDES = [8,4,2,1]`):
+  every 8th frame first — a coarse, wide-spaced loop that starts playing after
+  just ~3 frames — then every 4th, 2nd, and finally all 24, each wave doubling
+  the temporal resolution down to the native 5-minute spacing. A wave's layers
+  are only added to the map (which is what starts their tile requests) once the
+  previous, coarser wave has finished, and the animating set grows as each wave
+  lands, so the loop densifies mid-play without ever waiting on a blank frame.
+  It's a different endpoint than the live tile cache above.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES
