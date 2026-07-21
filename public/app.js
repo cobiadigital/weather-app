@@ -89,7 +89,11 @@
   // doubling the temporal resolution down to the native 5-minute spacing. So
   // you see motion after ~3 frames instead of waiting on all 24.
   const LOOP_STRIDES = [8, 4, 2, 1];
-  const LOOP_PLAY_MS = 500; // ms per frame while playing
+  // ms of playback per 5 minutes of real time. Each frame holds for this times
+  // its spacing (stride), so the loop advances at a constant real-time rate no
+  // matter how coarse the current wave is — the picture refines without the
+  // animation speeding up or slowing down. At full 5-min resolution: 200 ms.
+  const LOOP_PLAY_MS = 200;
   const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
   const LOOP_SAFETY_MS = 25000; // play the coarse wave even if a frame stalls
 
@@ -149,6 +153,7 @@
   let loopWavePromoted = []; // wave -> has it been folded into the animation?
   let loopLoadedSet = new Set(); // frame indices whose tiles have finished
   let loopActive = []; // sorted frame indices currently in the animation
+  let loopStride = LOOP_STRIDES[0]; // spacing (in frames) of the active set
 
   // Deferred PWA install prompt (Chrome/Android). Null on iOS Safari.
   let deferredInstallPrompt = null;
@@ -765,6 +770,7 @@
     loopReady = false;
     loopLoadedSet = new Set();
     loopActive = [];
+    loopStride = LOOP_STRIDES[0];
     setToggle(els.loopBtn, true);
     els.loopBar.classList.remove("hidden");
     // Controls stay inert until the first coarse wave is ready.
@@ -867,6 +873,7 @@
     const merged = new Set(loopActive);
     loopWaves[w].forEach((i) => merged.add(i));
     loopActive = Array.from(merged).sort((a, b) => a - b);
+    loopStride = LOOP_STRIDES[w]; // frames now sit this many apart
     addWave(w + 1);
     if (w === 0) markLoopReady();
   }
@@ -897,6 +904,7 @@
     const loaded = loopWaves[0].filter((i) => loopLoadedSet.has(i));
     const set = new Set(loaded.length ? loaded : [loopFrames.length - 1]);
     loopActive = Array.from(set).sort((a, b) => a - b);
+    loopStride = LOOP_STRIDES[0];
     loopWavePromoted[0] = true;
     addWave(1);
     markLoopReady();
@@ -998,8 +1006,14 @@
       let nextPos = pos + 1;
       if (nextPos >= loopActive.length) nextPos = 0;
       showLoopFrame(loopActive[nextPos]);
+      // Hold each frame in proportion to the real time it spans, so the loop
+      // runs at a steady real-time rate regardless of the active resolution.
+      const frameMs = LOOP_PLAY_MS * loopStride;
       const onNewest = loopIndex === loopFrames.length - 1;
-      loopTimer = setTimeout(tick, onNewest ? LOOP_END_DWELL_MS : LOOP_PLAY_MS);
+      loopTimer = setTimeout(
+        tick,
+        onNewest ? Math.max(LOOP_END_DWELL_MS, frameMs) : frameMs
+      );
     };
     loopTimer = setTimeout(tick, LOOP_PLAY_MS);
   }
