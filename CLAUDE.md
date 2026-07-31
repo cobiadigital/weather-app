@@ -4,9 +4,10 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-**Bendar.app** — a mobile-first web app for viewing local NEXRAD weather radar
-and active National Weather Service alerts. It's deployed as a **Cloudflare
-Worker** using **Static Assets**. All data is public and comes from the NWS.
+**Bendar.app** — a mobile-first web app for viewing local weather radar (NOAA
+MRMS by default, plus NEXRAD and other products) and active National Weather
+Service alerts. It's deployed as a **Cloudflare Worker** using **Static
+Assets**. All data is public and comes from NOAA / the NWS.
 
 ## Architecture
 
@@ -22,18 +23,23 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
     ("spaghetti") tracks and the NHC official forecast. Reuses `styles.css` +
     the same Leaflet/CARTO setup; page-specific CSS is inline in `tropics.html`.
 - **`src/index.js`** — the Worker. It handles `/api/nws/*` (proxying
-  `https://api.weather.gov`) and `/api/nhc/*` (the National Hurricane Center),
-  so it can set the `User-Agent` those services require (browsers can't set that
-  header) and cache responses at the edge.
+  `https://api.weather.gov`), `/api/nhc/*` (the National Hurricane Center), and
+  `/api/mrms/*` (re-tiling NCEP's MRMS radar WMS — see below), so it can set the
+  `User-Agent` those services require (browsers can't set that header), re-tile
+  where needed, and cache responses at the edge.
 - **`wrangler.toml`** — binds `public/` as static assets and points `main` at
   the Worker.
 
 ## Data sources
 
-- **Radar tiles (live)** — Iowa Environmental Mesonet NEXRAD N0Q composite:
+The **default** radar product is MRMS (the "Radar (MRMS, cached)" bullet below);
+the IEM products here are the others in the settings sheet. All are selectable.
+
+- **Radar tiles (IEM NEXRAD, live)** — Iowa Environmental Mesonet NEXRAD N0Q
+  composite (the "Base Reflectivity (NEXRAD)" product):
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png`
   (standard web-mercator `{z}/{x}/{y}` tiles; refreshes ~every 5 min).
-- **Radar loop (last 2 h)** — IEM's time-enabled NEXRAD WMS
+- **Radar loop (last 2 h, IEM NEXRAD)** — IEM's time-enabled NEXRAD WMS
   `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
   `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
   `app.js` builds one `L.tileLayer.wms` per 5-minute frame (24 layers, all at
@@ -47,10 +53,11 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   previous, coarser wave has finished, and the animating set grows as each wave
   lands, so the loop densifies mid-play without ever waiting on a blank frame.
   It's a different endpoint than the live tile cache above.
-- **Radar (MRMS, cached)** — the **Base Reflectivity (MRMS)** product is a
-  second base-reflectivity source served through our own Worker rather than
-  IEM. NCEP's GeoServer only speaks WMS `GetMap` (arbitrary bbox), so the Worker
-  re-tiles it as `{z}/{x}/{y}` and **bakes the frame time into the URL**:
+- **Radar (MRMS, cached — the default)** — the **Base Reflectivity (MRMS)**
+  product is the default on page open (`DEFAULT_PRODUCT = "mrms"`), served
+  through our own Worker rather than IEM. NCEP's GeoServer only speaks WMS
+  `GetMap` (arbitrary bbox), so the Worker re-tiles it as `{z}/{x}/{y}` and
+  **bakes the frame time into the URL**:
   - `GET /api/mrms/frames` → the layer's advertised `time` dimension (a rolling
     ~2 h list of ~2-minute instants) as a sorted ISO array. Both the live view
     and the loop snap to these canonical times.
