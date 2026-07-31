@@ -22,9 +22,9 @@ All data is public and comes from the **National Weather Service**:
 - **My location** button (uses your device GPS) and remembers your last spot.
   Once a location is set, the location controls collapse to a small pin in the
   top bar (tap it to re-center or change location)
-- **ZIP-code fallback** for when location services are off — an offline lookup
-  table (`public/zipcodes.json`) maps the ZIP to a lat/lon and recenters the
-  map. It stays hidden until a locate attempt fails
+- **ZIP-code fallback** for when location services are off — a tiny offline
+  lookup table (`public/zip3.json`) maps the ZIP's 3-digit prefix to a lat/lon
+  and recenters the map. It stays hidden until a locate attempt fails
 - Radar **opacity slider** and manual **refresh**; radar auto-refreshes every 5 min
 - **Loop 2h** — animate the last 2 hours of radar with a play/pause + scrubber
   and a timestamp, so you can see where the weather is heading
@@ -45,10 +45,12 @@ All data is public and comes from the **National Weather Service**:
   separate *satellite* product (it shows cloud cover, not precipitation); the
   NEXRAD radar product does not include cloud coverage.
 - **Alerts** — the NWS API, proxied through the Worker (see below).
-- **ZIP centroids** — `public/zipcodes.json`, a compact `{ "zip": [lat, lon] }`
-  table (~34k US ZIPs, coords rounded to 4 decimals, lazily fetched only when a
-  ZIP is entered). Derived from the US Census Bureau's ZCTA centroids via the
-  MIT-licensed [`us-zips`](https://www.npmjs.com/package/us-zips) dataset.
+- **ZIP centroids** — `public/zip3.json`, a compact `{ "zip3": [lat, lon] }`
+  table keyed by 3-digit ZIP prefix (~900 entries, ~18 KB, lazily fetched only
+  when a ZIP is entered). Radar is regional, so a prefix centroid (~30 km
+  median from the true ZIP) recenters the map fine at a fraction of the
+  payload. Aggregated by prefix from the US Census Bureau's ZCTA centroids via
+  the MIT-licensed [`us-zips`](https://www.npmjs.com/package/us-zips) dataset.
 
 ## Project layout
 

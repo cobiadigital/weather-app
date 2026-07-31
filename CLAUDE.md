@@ -116,12 +116,15 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
       has not issued a product)
     Toggles default off. The Worker does not proxy these; Leaflet
     `imageOverlay` hits MapServer directly (images don't need CORS).
-- **ZIP centroids (location fallback)** — `public/zipcodes.json`, a static
-  `{ "zip": [lat, lon] }` table (~34k US ZIPs, 4-decimal coords). `app.js`
-  fetches it lazily (only when a ZIP is entered) and memoizes it, so the ~0.9 MB
-  file never loads unless used. It's how the app recenters when geolocation is
-  off/denied. Regenerate from the MIT-licensed `us-zips` npm dataset (US Census
-  ZCTA centroids) if it needs refreshing.
+- **ZIP centroids (location fallback)** — `public/zip3.json`, a static
+  `{ "zip3": [lat, lon] }` table keyed by **3-digit ZIP prefix** (~900
+  sectional-center centroids, 2-decimal coords, ~18 KB). `app.js` fetches it
+  lazily (only when a ZIP is entered), memoizes it, and looks up the entered
+  ZIP's first three digits. It's how the app recenters when geolocation is
+  off/denied. Radar is regional, so a prefix centroid (median ~30 km from the
+  true ZIP) is plenty precise while keeping the payload tiny on cellular — the
+  full 5-digit table would be ~0.9 MB. Regenerate from the MIT-licensed
+  `us-zips` npm dataset (US Census ZCTA centroids), aggregated by prefix.
 
 ## PWA / install
 

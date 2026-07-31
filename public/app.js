@@ -799,12 +799,15 @@
   // --- ZIP-code fallback ---------------------------------------------------
 
   // Fetch the ZIP table once and memoize it (also de-dupes concurrent calls).
+  // It's keyed by 3-digit ZIP prefix (~900 sectional-center centroids, ~18 KB)
+  // rather than all ~34k ZIPs (~0.9 MB) — plenty precise to recenter the map,
+  // and a fraction of the payload on cellular. See tools note in README.
   function loadZipData() {
     if (zipData) return Promise.resolve(zipData);
     if (!zipLoading) {
-      zipLoading = fetch("/zipcodes.json")
+      zipLoading = fetch("/zip3.json")
         .then((res) => {
-          if (!res.ok) throw new Error("zipcodes " + res.status);
+          if (!res.ok) throw new Error("zip3 " + res.status);
           return res.json();
         })
         .then((data) => {
@@ -831,7 +834,8 @@
     els.zipBtn.disabled = true;
     try {
       const data = await loadZipData();
-      const hit = data[zip];
+      // Look up by 3-digit prefix — the table's centroid for that ZIP area.
+      const hit = data[zip.slice(0, 3)];
       if (!hit) {
         setStatus("ZIP " + zip + " not found.", true);
         return;
