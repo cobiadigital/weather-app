@@ -84,6 +84,12 @@
   const MRMS_FRAMES_URL = "/api/mrms/frames";
   const MRMS_TILE_URL = "/api/mrms/{z}/{x}/{y}.png?t={t}";
   const MRMS_CACHE_NAME = "mrms-tiles-v1";
+  // MRMS conus_bref_qcd covers the lower 48 only. Outside this box (Alaska,
+  // Hawaii, Puerto Rico, …) the MRMS default silently falls back to the IEM
+  // NEXRAD product, which aggregates the OCONUS radars too. Generous bounds —
+  // a false "inside" just shows empty MRMS, which is fine over open ocean.
+  const CONUS_BOUNDS = { south: 22, west: -127, north: 51, east: -65 };
+  const MRMS_FALLBACK_PRODUCT = "base";
 
   const DEFAULT_VIEW = { lat: 39.5, lon: -98.35, zoom: 4 }; // continental US
   const LOCATED_ZOOM = 9;
@@ -159,6 +165,7 @@
   let meMarker;
   let refreshTimer;
   let radarProductId = loadProductId(); // selected RADAR_PRODUCTS key
+  let displayedProductId = null; // product the live radarLayer is built for
 
   // Radar-loop state.
   let loopOn = false;
@@ -284,9 +291,13 @@
     ).addTo(map);
 
     radarLayer = buildRadarLayer().addTo(map);
+    displayedProductId = effectiveProductId();
     if (currentProduct().mrms) primeMrmsLive();
     syncProductUI();
     syncLoopAvailability();
+
+    // Re-evaluate the CONUS fallback whenever the view settles somewhere new.
+    map.on("moveend", onRadarViewChanged);
 
     if (saved) {
       setMeMarker(saved.lat, saved.lon);
@@ -326,8 +337,61 @@
 
   // --- Radar products ------------------------------------------------------
 
-  function currentProduct() {
+  // The product the user picked (persisted). Distinct from the *effective*
+  // product below, which may differ when the MRMS default auto-falls-back.
+  function selectedProduct() {
     return RADAR_PRODUCTS[radarProductId] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+  }
+
+  // The product actually shown. All the layer/loop/refresh code reads this, so
+  // the CONUS fallback flows through everywhere by changing this one function.
+  function currentProduct() {
+    return RADAR_PRODUCTS[effectiveProductId()] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+  }
+
+  function effectiveProductId() {
+    if (radarProductId === "mrms" && map) {
+      const c = map.getCenter();
+      if (!inConus(c.lat, c.lng)) return MRMS_FALLBACK_PRODUCT;
+    }
+    return radarProductId;
+  }
+
+  function inConus(lat, lon) {
+    return (
+      lat >= CONUS_BOUNDS.south &&
+      lat <= CONUS_BOUNDS.north &&
+      lon >= CONUS_BOUNDS.west &&
+      lon <= CONUS_BOUNDS.east
+    );
+  }
+
+  // Whether we're currently substituting the fallback for the MRMS default.
+  function mrmsFellBack() {
+    return radarProductId === "mrms" && effectiveProductId() !== "mrms";
+  }
+
+  // Map settled somewhere new: if that flipped the effective product (crossed
+  // the CONUS edge under the MRMS default), swap the live layer to match. The
+  // loop manages its own layers, so skip while it's running.
+  function onRadarViewChanged() {
+    if (loopOn) return;
+    if (effectiveProductId() === displayedProductId) return;
+    rebuildLiveLayer();
+  }
+
+  function rebuildLiveLayer() {
+    const next = buildRadarLayer();
+    if (radarLayer) map.removeLayer(radarLayer);
+    radarLayer = next.addTo(map);
+    displayedProductId = effectiveProductId();
+    if (currentProduct().mrms) primeMrmsLive();
+    syncLoopAvailability();
+    setStatus(
+      mrmsFellBack()
+        ? "Outside MRMS coverage — showing NEXRAD radar."
+        : "Showing " + currentProduct().label + "."
+    );
   }
 
   function radarTileUrl(product, bustCache) {
@@ -515,7 +579,7 @@
   }
 
   function syncProductUI() {
-    const id = currentProduct().id;
+    const id = radarProductId; // reflect the user's choice, not the fallback
     if (!els.radarProductOptions) return;
     els.radarProductOptions.querySelectorAll("[data-product]").forEach((btn) => {
       const on = btn.getAttribute("data-product") === id;
@@ -563,9 +627,16 @@
     const next = buildRadarLayer();
     if (radarLayer) map.removeLayer(radarLayer);
     radarLayer = next.addTo(map);
+    displayedProductId = effectiveProductId();
     if (p.mrms) primeMrmsLive();
     closeSettingsSheet();
-    setStatus(p.label + " loaded.");
+    // p is the effective product, so if the user picked MRMS while off-CONUS,
+    // say so rather than silently naming NEXRAD.
+    setStatus(
+      mrmsFellBack()
+        ? "Outside MRMS coverage — showing NEXRAD radar."
+        : p.label + " loaded."
+    );
   }
 
   function openSettingsSheet() {
@@ -1169,12 +1240,19 @@
     loopLoadedSet = new Set();
     loopActive = [];
 
-    // Restore the live radar.
-    if (radarLayer) {
+    // Restore the live radar, re-checking the CONUS fallback in case the view
+    // moved across the boundary while the loop ran.
+    if (effectiveProductId() !== displayedProductId) {
+      rebuildLiveLayer();
+    } else if (radarLayer) {
       radarLayer.addTo(map);
       refreshRadar(false);
+      setStatus(
+        mrmsFellBack()
+          ? "Outside MRMS coverage — showing live NEXRAD radar."
+          : "Showing live " + currentProduct().label + "."
+      );
     }
-    setStatus("Showing live " + currentProduct().label + ".");
   }
 
   // Build 24 frame timestamps at 5-minute spacing (the native composite

@@ -69,6 +69,15 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   slot snaps to that exact frame — guaranteeing the current view is a cache hit.
   Entries older than the 2 h window are evicted. Everything degrades to plain
   network tiles where Cache Storage is unavailable (e.g. private mode).
+
+  MRMS `conus_bref_qcd` covers the **lower 48 only**. When the map is centered
+  outside CONUS (Alaska, Hawaii, Puerto Rico, …) the MRMS *default* silently
+  falls back to the IEM NEXRAD product, which aggregates the OCONUS radars.
+  `app.js` splits `selectedProduct()` (the persisted choice, drives the
+  settings radio) from `currentProduct()` → `effectiveProductId()` (what's
+  shown; applies the fallback). The live layer is rebuilt on every `moveend`
+  that crosses the CONUS box; the fallback only applies to the MRMS default,
+  not to an explicitly-chosen product.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES
