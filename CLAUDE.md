@@ -47,6 +47,28 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   previous, coarser wave has finished, and the animating set grows as each wave
   lands, so the loop densifies mid-play without ever waiting on a blank frame.
   It's a different endpoint than the live tile cache above.
+- **Radar (MRMS, cached)** — the **Base Reflectivity (MRMS)** product is a
+  second base-reflectivity source served through our own Worker rather than
+  IEM. NCEP's GeoServer only speaks WMS `GetMap` (arbitrary bbox), so the Worker
+  re-tiles it as `{z}/{x}/{y}` and **bakes the frame time into the URL**:
+  - `GET /api/mrms/frames` → the layer's advertised `time` dimension (a rolling
+    ~2 h list of ~2-minute instants) as a sorted ISO array. Both the live view
+    and the loop snap to these canonical times.
+  - `GET /api/mrms/{z}/{x}/{y}.png?t=<iso>` → one 256px tile, rendered by NCEP
+    for that tile's EPSG:3857 bbox at frame `t` (WMS 1.1.1, so BBOX axis order
+    is x,y). Immutable per `(z,x,y,t)`, so it's edge-cached hard.
+
+  Because the live tile URL now carries the timestamp (IEM's live tile is
+  timeless), a frame the live view fetched can be **reused by the loop**.
+  `app.js` wraps the MRMS layers in a `cachedTileLayer` (a `L.TileLayer`
+  subclass) that reads/writes the **Cache Storage API** (`mrms-tiles-v1`):
+  cache-first tile loads, so tapping **Loop 2h** replays frames already on the
+  device with no re-download, and the cache persists across reloads. The live
+  view pins to the newest canonical frame (re-pinned on each 5-min refresh, the
+  same cadence at which the cache accumulates frames), and the loop's newest
+  slot snaps to that exact frame — guaranteeing the current view is a cache hit.
+  Entries older than the 2 h window are evicted. Everything degrades to plain
+  network tiles where Cache Storage is unavailable (e.g. private mode).
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES
