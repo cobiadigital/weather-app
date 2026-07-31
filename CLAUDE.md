@@ -4,9 +4,10 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-**Bendar.app** — a mobile-first web app for viewing local NEXRAD weather radar
-and active National Weather Service alerts. It's deployed as a **Cloudflare
-Worker** using **Static Assets**. All data is public and comes from the NWS.
+**Bendar.app** — a mobile-first web app for viewing local weather radar (NOAA
+MRMS by default, plus NEXRAD and other products) and active National Weather
+Service alerts. It's deployed as a **Cloudflare Worker** using **Static
+Assets**. All data is public and comes from NOAA / the NWS.
 
 ## Architecture
 
@@ -22,18 +23,23 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
     ("spaghetti") tracks and the NHC official forecast. Reuses `styles.css` +
     the same Leaflet/CARTO setup; page-specific CSS is inline in `tropics.html`.
 - **`src/index.js`** — the Worker. It handles `/api/nws/*` (proxying
-  `https://api.weather.gov`) and `/api/nhc/*` (the National Hurricane Center),
-  so it can set the `User-Agent` those services require (browsers can't set that
-  header) and cache responses at the edge.
+  `https://api.weather.gov`), `/api/nhc/*` (the National Hurricane Center), and
+  `/api/mrms/*` (re-tiling NCEP's MRMS radar WMS — see below), so it can set the
+  `User-Agent` those services require (browsers can't set that header), re-tile
+  where needed, and cache responses at the edge.
 - **`wrangler.toml`** — binds `public/` as static assets and points `main` at
   the Worker.
 
 ## Data sources
 
-- **Radar tiles (live)** — Iowa Environmental Mesonet NEXRAD N0Q composite:
+The **default** radar product is MRMS (the "Radar (MRMS, cached)" bullet below);
+the IEM products here are the others in the settings sheet. All are selectable.
+
+- **Radar tiles (IEM NEXRAD, live)** — Iowa Environmental Mesonet NEXRAD N0Q
+  composite (the "Base Reflectivity (NEXRAD)" product):
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png`
   (standard web-mercator `{z}/{x}/{y}` tiles; refreshes ~every 5 min).
-- **Radar loop (last 2 h)** — IEM's time-enabled NEXRAD WMS
+- **Radar loop (last 2 h, IEM NEXRAD)** — IEM's time-enabled NEXRAD WMS
   `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
   `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
   `app.js` builds one `L.tileLayer.wms` per 5-minute frame (24 layers, all at
@@ -47,6 +53,38 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
   previous, coarser wave has finished, and the animating set grows as each wave
   lands, so the loop densifies mid-play without ever waiting on a blank frame.
   It's a different endpoint than the live tile cache above.
+- **Radar (MRMS, cached — the default)** — the **Base Reflectivity (MRMS)**
+  product is the default on page open (`DEFAULT_PRODUCT = "mrms"`), served
+  through our own Worker rather than IEM. NCEP's GeoServer only speaks WMS
+  `GetMap` (arbitrary bbox), so the Worker re-tiles it as `{z}/{x}/{y}` and
+  **bakes the frame time into the URL**:
+  - `GET /api/mrms/frames` → the layer's advertised `time` dimension (a rolling
+    ~2 h list of ~2-minute instants) as a sorted ISO array. Both the live view
+    and the loop snap to these canonical times.
+  - `GET /api/mrms/{z}/{x}/{y}.png?t=<iso>` → one 256px tile, rendered by NCEP
+    for that tile's EPSG:3857 bbox at frame `t` (WMS 1.1.1, so BBOX axis order
+    is x,y). Immutable per `(z,x,y,t)`, so it's edge-cached hard.
+
+  Because the live tile URL now carries the timestamp (IEM's live tile is
+  timeless), a frame the live view fetched can be **reused by the loop**.
+  `app.js` wraps the MRMS layers in a `cachedTileLayer` (a `L.TileLayer`
+  subclass) that reads/writes the **Cache Storage API** (`mrms-tiles-v1`):
+  cache-first tile loads, so tapping **Loop 2h** replays frames already on the
+  device with no re-download, and the cache persists across reloads. The live
+  view pins to the newest canonical frame (re-pinned on each 5-min refresh, the
+  same cadence at which the cache accumulates frames), and the loop's newest
+  slot snaps to that exact frame — guaranteeing the current view is a cache hit.
+  Entries older than the 2 h window are evicted. Everything degrades to plain
+  network tiles where Cache Storage is unavailable (e.g. private mode).
+
+  MRMS `conus_bref_qcd` covers the **lower 48 only**. When the map is centered
+  outside CONUS (Alaska, Hawaii, Puerto Rico, …) the MRMS *default* silently
+  falls back to the IEM NEXRAD product, which aggregates the OCONUS radars.
+  `app.js` splits `selectedProduct()` (the persisted choice, drives the
+  settings radio) from `currentProduct()` → `effectiveProductId()` (what's
+  shown; applies the fallback). The live layer is rebuilt on every `moveend`
+  that crosses the CONUS box; the fallback only applies to the MRMS default,
+  not to an explicitly-chosen product.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES
@@ -85,12 +123,15 @@ Worker** using **Static Assets**. All data is public and comes from the NWS.
       has not issued a product)
     Toggles default off. The Worker does not proxy these; Leaflet
     `imageOverlay` hits MapServer directly (images don't need CORS).
-- **ZIP centroids (location fallback)** — `public/zipcodes.json`, a static
-  `{ "zip": [lat, lon] }` table (~34k US ZIPs, 4-decimal coords). `app.js`
-  fetches it lazily (only when a ZIP is entered) and memoizes it, so the ~0.9 MB
-  file never loads unless used. It's how the app recenters when geolocation is
-  off/denied. Regenerate from the MIT-licensed `us-zips` npm dataset (US Census
-  ZCTA centroids) if it needs refreshing.
+- **ZIP centroids (location fallback)** — `public/zip3.json`, a static
+  `{ "zip3": [lat, lon] }` table keyed by **3-digit ZIP prefix** (~900
+  sectional-center centroids, 2-decimal coords, ~18 KB). `app.js` fetches it
+  lazily (only when a ZIP is entered), memoizes it, and looks up the entered
+  ZIP's first three digits. It's how the app recenters when geolocation is
+  off/denied. Radar is regional, so a prefix centroid (median ~30 km from the
+  true ZIP) is plenty precise while keeping the payload tiny on cellular — the
+  full 5-digit table would be ~0.9 MB. Regenerate from the MIT-licensed
+  `us-zips` npm dataset (US Census ZCTA centroids), aggregated by prefix.
 
 ## PWA / install
 

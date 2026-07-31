@@ -22,7 +22,7 @@
   const RADAR_PRODUCTS = {
     base: {
       id: "base",
-      label: "Base Reflectivity",
+      label: "Base Reflectivity (NEXRAD)",
       layer: "nexrad-n0q-900913",
       attribution:
         'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
@@ -31,6 +31,18 @@
         wmsUrl: "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi",
         wmsLayer: "nexrad-n0q-wmst",
       },
+    },
+    mrms: {
+      id: "mrms",
+      label: "Base Reflectivity (MRMS)",
+      // Served by our own Worker (/api/mrms/*), which re-tiles NCEP's MRMS WMS
+      // and bakes the frame time into the URL so live tiles and loop tiles
+      // share cache keys. `mrms: true` switches the live/loop/refresh paths
+      // onto the timestamped, Cache-Storage-backed code below.
+      mrms: true,
+      attribution:
+        'Radar: <a href="https://www.nssl.noaa.gov/projects/mrms/">NOAA MRMS</a> via NCEP',
+      loop: { mrms: true },
     },
     composite: {
       id: "composite",
@@ -59,13 +71,25 @@
       loop: null,
     },
   };
-  const DEFAULT_PRODUCT = "base";
+  const DEFAULT_PRODUCT = "mrms";
 
   // GOES East infrared composite from IEM. This is *satellite* cloud imagery
   // (NOT part of the NEXRAD radar product) — infrared shows cloud cover day and
   // night. Same {z}/{x}/{y} tile scheme as the radar layer.
   const CLOUD_TILE_URL =
     "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png";
+
+  // MRMS (via our Worker). The tile template carries {t}, the frame time both
+  // the live layer and the loop pin to — identical URLs => Cache Storage hits.
+  const MRMS_FRAMES_URL = "/api/mrms/frames";
+  const MRMS_TILE_URL = "/api/mrms/{z}/{x}/{y}.png?t={t}";
+  const MRMS_CACHE_NAME = "mrms-tiles-v1";
+  // MRMS conus_bref_qcd covers the lower 48 only. Outside this box (Alaska,
+  // Hawaii, Puerto Rico, …) the MRMS default silently falls back to the IEM
+  // NEXRAD product, which aggregates the OCONUS radars too. Generous bounds —
+  // a false "inside" just shows empty MRMS, which is fine over open ocean.
+  const CONUS_BOUNDS = { south: 22, west: -127, north: 51, east: -65 };
+  const MRMS_FALLBACK_PRODUCT = "base";
 
   const DEFAULT_VIEW = { lat: 39.5, lon: -98.35, zoom: 4 }; // continental US
   const LOCATED_ZOOM = 9;
@@ -96,6 +120,8 @@
   const LOOP_PLAY_MS = 200;
   const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
   const LOOP_SAFETY_MS = 25000; // play the coarse wave even if a frame stalls
+  // Keep cached MRMS tiles a little past the loop window, then evict.
+  const MRMS_CACHE_WINDOW_MS = (LOOP_HOURS * 60 + 20) * 60 * 1000;
 
   const els = {
     status: document.getElementById("status"),
@@ -139,6 +165,7 @@
   let meMarker;
   let refreshTimer;
   let radarProductId = loadProductId(); // selected RADAR_PRODUCTS key
+  let displayedProductId = null; // product the live radarLayer is built for
 
   // Radar-loop state.
   let loopOn = false;
@@ -157,6 +184,13 @@
   let loopLoadedSet = new Set(); // frame indices whose tiles have finished
   let loopActive = []; // sorted frame indices currently in the animation
   let loopStride = LOOP_STRIDES[0]; // spacing (in frames) of the active set
+
+  // MRMS canonical frame times (Date[], oldest -> newest), memoized with a
+  // short TTL. Both the live view and the loop snap to these so their tile
+  // URLs — and therefore their cache entries — line up exactly.
+  let mrmsFrames = [];
+  let mrmsFramesAt = 0; // when we last fetched the list (ms)
+  const MRMS_FRAMES_TTL_MS = 60 * 1000;
 
   // Deferred PWA install prompt (Chrome/Android). Null on iOS Safari.
   let deferredInstallPrompt = null;
@@ -257,8 +291,13 @@
     ).addTo(map);
 
     radarLayer = buildRadarLayer().addTo(map);
+    displayedProductId = effectiveProductId();
+    if (currentProduct().mrms) primeMrmsLive();
     syncProductUI();
     syncLoopAvailability();
+
+    // Re-evaluate the CONUS fallback whenever the view settles somewhere new.
+    map.on("moveend", onRadarViewChanged);
 
     if (saved) {
       setMeMarker(saved.lat, saved.lon);
@@ -298,8 +337,61 @@
 
   // --- Radar products ------------------------------------------------------
 
-  function currentProduct() {
+  // The product the user picked (persisted). Distinct from the *effective*
+  // product below, which may differ when the MRMS default auto-falls-back.
+  function selectedProduct() {
     return RADAR_PRODUCTS[radarProductId] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+  }
+
+  // The product actually shown. All the layer/loop/refresh code reads this, so
+  // the CONUS fallback flows through everywhere by changing this one function.
+  function currentProduct() {
+    return RADAR_PRODUCTS[effectiveProductId()] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+  }
+
+  function effectiveProductId() {
+    if (radarProductId === "mrms" && map) {
+      const c = map.getCenter();
+      if (!inConus(c.lat, c.lng)) return MRMS_FALLBACK_PRODUCT;
+    }
+    return radarProductId;
+  }
+
+  function inConus(lat, lon) {
+    return (
+      lat >= CONUS_BOUNDS.south &&
+      lat <= CONUS_BOUNDS.north &&
+      lon >= CONUS_BOUNDS.west &&
+      lon <= CONUS_BOUNDS.east
+    );
+  }
+
+  // Whether we're currently substituting the fallback for the MRMS default.
+  function mrmsFellBack() {
+    return radarProductId === "mrms" && effectiveProductId() !== "mrms";
+  }
+
+  // Map settled somewhere new: if that flipped the effective product (crossed
+  // the CONUS edge under the MRMS default), swap the live layer to match. The
+  // loop manages its own layers, so skip while it's running.
+  function onRadarViewChanged() {
+    if (loopOn) return;
+    if (effectiveProductId() === displayedProductId) return;
+    rebuildLiveLayer();
+  }
+
+  function rebuildLiveLayer() {
+    const next = buildRadarLayer();
+    if (radarLayer) map.removeLayer(radarLayer);
+    radarLayer = next.addTo(map);
+    displayedProductId = effectiveProductId();
+    if (currentProduct().mrms) primeMrmsLive();
+    syncLoopAvailability();
+    setStatus(
+      mrmsFellBack()
+        ? "Outside MRMS coverage — showing NEXRAD radar."
+        : "Showing " + currentProduct().label + "."
+    );
   }
 
   function radarTileUrl(product, bustCache) {
@@ -311,6 +403,18 @@
 
   function buildRadarLayer() {
     const p = currentProduct();
+    if (p.mrms) {
+      // Pin to the current frame (a clock estimate until the frame list loads;
+      // primeMrmsLive() swaps in the exact canonical time right after).
+      return cachedTileLayer(MRMS_TILE_URL, {
+        t: isoUTC(mrmsLiveFrame()),
+        opacity: sliderToOpacity(els.opacity.value),
+        attribution: p.attribution,
+        zIndex: 5,
+        maxZoom: 15,
+        crossOrigin: "anonymous",
+      });
+    }
     return L.tileLayer(radarTileUrl(p, false), {
       opacity: sliderToOpacity(els.opacity.value),
       attribution: p.attribution,
@@ -318,6 +422,142 @@
       maxZoom: 15,
       crossOrigin: "anonymous",
     });
+  }
+
+  // --- MRMS: timestamped tiles + on-device cache ---------------------------
+
+  // A Leaflet tile layer that reads/writes the Cache Storage API. A tile the
+  // live view already fetched is reused instantly by the loop (and survives a
+  // reload) instead of hitting the network again. Where Cache Storage isn't
+  // usable (e.g. private mode) it degrades to normal tile loading. Built lazily
+  // so it never touches L before Leaflet has loaded.
+  let CachedTileLayerClass = null;
+  function cachedTileLayer(url, opts) {
+    if (!CachedTileLayerClass) {
+      CachedTileLayerClass = L.TileLayer.extend({
+        createTile(coords, done) {
+          const tile = document.createElement("img");
+          tile.setAttribute("role", "presentation");
+          tile.alt = "";
+          if (this.options.crossOrigin) tile.crossOrigin = this.options.crossOrigin;
+          const src = this.getTileUrl(coords);
+          loadCachedTile(src).then((objectUrl) => {
+            if (objectUrl) {
+              tile.onload = () => {
+                URL.revokeObjectURL(objectUrl);
+                done(null, tile);
+              };
+              tile.onerror = () => {
+                URL.revokeObjectURL(objectUrl);
+                done(new Error("tile error"), tile);
+              };
+              tile.src = objectUrl;
+            } else {
+              tile.onload = () => done(null, tile);
+              tile.onerror = () => done(new Error("tile error"), tile);
+              tile.src = src;
+            }
+          });
+          return tile;
+        },
+      });
+    }
+    return new CachedTileLayerClass(url, opts);
+  }
+
+  // Object URL for `url`, served from Cache Storage when present and
+  // fetched+stored when not. Resolves null if caching isn't usable, so the
+  // caller falls back to a plain <img src>.
+  async function loadCachedTile(url) {
+    if (!("caches" in window)) return null;
+    try {
+      const cache = await caches.open(MRMS_CACHE_NAME);
+      let resp = await cache.match(url);
+      if (!resp) {
+        resp = await fetch(url, { cache: "default" });
+        if (resp && resp.ok) await cache.put(url, resp.clone());
+      }
+      if (!resp || !resp.ok) return null;
+      return URL.createObjectURL(await resp.blob());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Drop cached tiles whose frame time (?t=) has aged out of the loop window.
+  async function evictMrmsCache() {
+    if (!("caches" in window)) return;
+    try {
+      const cache = await caches.open(MRMS_CACHE_NAME);
+      const cutoff = Date.now() - MRMS_CACHE_WINDOW_MS;
+      const reqs = await cache.keys();
+      await Promise.all(
+        reqs.map((req) => {
+          const t = new URL(req.url).searchParams.get("t");
+          const ms = t ? Date.parse(t) : NaN;
+          return Number.isFinite(ms) && ms < cutoff ? cache.delete(req) : null;
+        })
+      );
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  // Fetch + memoize the canonical MRMS frame list (Date[], oldest -> newest).
+  async function ensureMrmsFrames() {
+    if (mrmsFrames.length && Date.now() - mrmsFramesAt < MRMS_FRAMES_TTL_MS) {
+      return mrmsFrames;
+    }
+    try {
+      const resp = await fetch(MRMS_FRAMES_URL, { cache: "no-store" });
+      const data = await resp.json();
+      const frames = (data.frames || [])
+        .map((s) => new Date(s))
+        .filter((d) => !isNaN(d.getTime()))
+        .sort((a, b) => a - b);
+      if (frames.length) {
+        mrmsFrames = frames;
+        mrmsFramesAt = Date.now();
+      }
+    } catch (_) {
+      /* keep any previous list */
+    }
+    return mrmsFrames;
+  }
+
+  // Nearest canonical frame to a target time; null before the list has loaded.
+  function snapMrmsFrame(targetMs) {
+    if (!mrmsFrames.length) return null;
+    let best = mrmsFrames[0];
+    let bestDist = Infinity;
+    for (const f of mrmsFrames) {
+      const d = Math.abs(f.getTime() - targetMs);
+      if (d < bestDist) {
+        bestDist = d;
+        best = f;
+      }
+    }
+    return best;
+  }
+
+  // The frame the live view should show: newest canonical frame at/under the
+  // lag horizon (a clock estimate until the list loads).
+  function mrmsLiveFrame() {
+    const target = Date.now() - LOOP_LAG_MIN * 60 * 1000;
+    return snapMrmsFrame(target) || new Date(target);
+  }
+
+  // Load the frame list, then repoint the live layer at the exact canonical
+  // frame (so its tiles match the loop's) and evict stale cache entries.
+  async function primeMrmsLive() {
+    await ensureMrmsFrames();
+    if (currentProduct().mrms && radarLayer && !loopOn) {
+      // redraw() (not setUrl) — the URL *template* is unchanged, only options.t
+      // is, and Leaflet's setUrl skips the redraw when the template matches.
+      radarLayer.options.t = isoUTC(mrmsLiveFrame());
+      radarLayer.redraw();
+    }
+    evictMrmsCache();
   }
 
   function loadProductId() {
@@ -339,7 +579,7 @@
   }
 
   function syncProductUI() {
-    const id = currentProduct().id;
+    const id = radarProductId; // reflect the user's choice, not the fallback
     if (!els.radarProductOptions) return;
     els.radarProductOptions.querySelectorAll("[data-product]").forEach((btn) => {
       const on = btn.getAttribute("data-product") === id;
@@ -387,8 +627,16 @@
     const next = buildRadarLayer();
     if (radarLayer) map.removeLayer(radarLayer);
     radarLayer = next.addTo(map);
+    displayedProductId = effectiveProductId();
+    if (p.mrms) primeMrmsLive();
     closeSettingsSheet();
-    setStatus(p.label + " loaded.");
+    // p is the effective product, so if the user picked MRMS while off-CONUS,
+    // say so rather than silently naming NEXRAD.
+    setStatus(
+      mrmsFellBack()
+        ? "Outside MRMS coverage — showing NEXRAD radar."
+        : p.label + " loaded."
+    );
   }
 
   function openSettingsSheet() {
@@ -418,10 +666,24 @@
   // so there's no flash.
   function refreshRadar(userInitiated) {
     if (!radarLayer || loopOn) return; // the loop drives its own frames
-    radarLayer.setUrl(radarTileUrl(currentProduct(), true));
+    const p = currentProduct();
+    if (p.mrms) {
+      // Re-resolve the newest canonical frame and repoint the layer at it.
+      // Same URL scheme the loop uses, so what we fetch now is a loop cache
+      // hit later. (No cache-buster — a given frame's tiles are immutable.)
+      ensureMrmsFrames().then(() => {
+        if (loopOn || currentProduct().id !== p.id) return;
+        // redraw() (not setUrl) — only options.t changes; see primeMrmsLive.
+        radarLayer.options.t = isoUTC(mrmsLiveFrame());
+        radarLayer.redraw();
+        evictMrmsCache();
+      });
+    } else {
+      radarLayer.setUrl(radarTileUrl(p, true));
+    }
     if (userInitiated) {
       els.refreshBtn.classList.add("spin");
-      setStatus(currentProduct().label + " updated " + timeNow() + ".");
+      setStatus(p.label + " updated " + timeNow() + ".");
       setTimeout(() => els.refreshBtn.classList.remove("spin"), 800);
     }
   }
@@ -537,12 +799,15 @@
   // --- ZIP-code fallback ---------------------------------------------------
 
   // Fetch the ZIP table once and memoize it (also de-dupes concurrent calls).
+  // It's keyed by 3-digit ZIP prefix (~900 sectional-center centroids, ~18 KB)
+  // rather than all ~34k ZIPs (~0.9 MB) — plenty precise to recenter the map,
+  // and a fraction of the payload on cellular. See tools note in README.
   function loadZipData() {
     if (zipData) return Promise.resolve(zipData);
     if (!zipLoading) {
-      zipLoading = fetch("/zipcodes.json")
+      zipLoading = fetch("/zip3.json")
         .then((res) => {
-          if (!res.ok) throw new Error("zipcodes " + res.status);
+          if (!res.ok) throw new Error("zip3 " + res.status);
           return res.json();
         })
         .then((data) => {
@@ -569,7 +834,8 @@
     els.zipBtn.disabled = true;
     try {
       const data = await loadZipData();
-      const hit = data[zip];
+      // Look up by 3-digit prefix — the table's centroid for that ZIP area.
+      const hit = data[zip.slice(0, 3)];
       if (!hit) {
         setStatus("ZIP " + zip + " not found.", true);
         return;
@@ -765,8 +1031,8 @@
   }
 
   function startLoop() {
-    const loopCfg = currentProduct().loop;
-    if (!loopCfg) {
+    const p = currentProduct();
+    if (!p.loop) {
       setStatus("Loop is only available for Base Reflectivity.");
       return;
     }
@@ -785,13 +1051,34 @@
     // Live radar and the loop show the same product, so hide the live layer
     // while the loop drives the display.
     if (radarLayer) map.removeLayer(radarLayer);
+    setStatus("Loading radar loop… 0%");
 
+    // MRMS builds its frames from the canonical list, so it must load first;
+    // IEM derives frames from the clock and can build right away.
+    if (p.mrms) {
+      ensureMrmsFrames().then(() => {
+        if (loopOn) buildLoopLayers(p);
+      });
+    } else {
+      buildLoopLayers(p);
+    }
+  }
+
+  // Build one tile layer per frame and start the first (coarse) wave. Called
+  // synchronously for IEM; after the frame list resolves for MRMS.
+  function buildLoopLayers(p) {
+    const loopCfg = p.loop;
     buildLoopFrames();
+    if (!loopFrames.length) {
+      setStatus("Radar loop unavailable right now.");
+      stopLoop();
+      return;
+    }
     loopIndex = loopFrames.length - 1; // start on the most recent frame
 
     const op = sliderToOpacity(els.opacity.value);
     const total = loopFrames.length;
-    const attr = currentProduct().attribution;
+    const attr = p.attribution;
 
     // Work out the dyadic waves and each frame's wave, so we can load the
     // coarse frames first and reveal a watchable loop before the rest arrive.
@@ -809,22 +1096,36 @@
     // Layers are added to the map wave-by-wave (see addWave/promoteWave), not
     // all at once, so the browser spends its first connections on the coarse
     // frames and the loop can start before the finer waves finish.
+    //
+    // MRMS frames come from our cached tile layer (so a frame the live view
+    // already fetched loads instantly from Cache Storage); IEM frames come
+    // from the time-enabled WMS.
     loopLayers = loopFrames.map((frame, i) => {
-      const layer = L.tileLayer.wms(loopCfg.wmsUrl, {
-        layers: loopCfg.wmsLayer,
-        format: "image/png",
-        transparent: true,
-        time: isoUTC(frame),
+      const shared = {
         // Show the newest frame right away; keep the rest hidden until shown.
         opacity: i === loopIndex ? op : 0,
         zIndex: 5,
         maxZoom: 15,
         crossOrigin: "anonymous", // keep loop frames canvas-exportable (Share)
         updateWhenIdle: true, // don't refetch every frame while panning
-        keepBuffer: 0, // 24 layers — keep each one's memory footprint small
+        keepBuffer: 0, // many layers — keep each one's memory footprint small
         // One attribution entry is plenty (Leaflet de-dupes identical text).
         attribution: i === 0 ? attr : undefined,
-      });
+      };
+      const layer = p.mrms
+        ? cachedTileLayer(MRMS_TILE_URL, Object.assign({ t: isoUTC(frame) }, shared))
+        : L.tileLayer.wms(
+            loopCfg.wmsUrl,
+            Object.assign(
+              {
+                layers: loopCfg.wmsLayer,
+                format: "image/png",
+                transparent: true,
+                time: isoUTC(frame),
+              },
+              shared
+            )
+          );
       layer.once("load", () => onFrameLoaded(i));
       return layer;
     });
@@ -835,7 +1136,6 @@
     els.loopScrub.max = String(total - 1);
     els.loopScrub.value = String(loopIndex);
     updateLoopLabel();
-    setStatus("Loading radar loop… 0%");
 
     // Safety net: if a coarse frame's tiles never finish (server hiccup), play
     // with whatever's loaded so far rather than hanging.
@@ -944,18 +1244,29 @@
     loopLoadedSet = new Set();
     loopActive = [];
 
-    // Restore the live radar.
-    if (radarLayer) {
+    // Restore the live radar, re-checking the CONUS fallback in case the view
+    // moved across the boundary while the loop ran.
+    if (effectiveProductId() !== displayedProductId) {
+      rebuildLiveLayer();
+    } else if (radarLayer) {
       radarLayer.addTo(map);
       refreshRadar(false);
+      setStatus(
+        mrmsFellBack()
+          ? "Outside MRMS coverage — showing live NEXRAD radar."
+          : "Showing live " + currentProduct().label + "."
+      );
     }
-    setStatus("Showing live " + currentProduct().label + ".");
   }
 
   // Build 24 frame timestamps at 5-minute spacing (the native composite
   // cadence), ending one lag-step back from now (snapped down to the 5-minute
   // grid the composites are built on).
   function buildLoopFrames() {
+    if (currentProduct().mrms) {
+      buildMrmsLoopFrames();
+      return;
+    }
     const now = Date.now();
     const step = LOOP_STEP_MIN * 60 * 1000;
     let latest = Math.floor((now - LOOP_LAG_MIN * 60 * 1000) / step) * step;
@@ -963,6 +1274,28 @@
     for (let i = LOOP_FRAME_COUNT - 1; i >= 0; i--) {
       loopFrames.push(new Date(latest - i * step));
     }
+  }
+
+  // MRMS loop frames: 24 slots at 5-minute spacing across the last 2h, each
+  // snapped to the nearest canonical frame (deduped). The newest slot snaps to
+  // the very frame the live view is showing, so tapping Loop reuses the tiles
+  // already in Cache Storage instead of re-downloading them.
+  function buildMrmsLoopFrames() {
+    const step = LOOP_STEP_MIN * 60 * 1000;
+    const target = Date.now() - LOOP_LAG_MIN * 60 * 1000;
+    const newest = (snapMrmsFrame(target) || new Date(target)).getTime();
+    const frames = [];
+    const seen = new Set();
+    for (let i = LOOP_FRAME_COUNT - 1; i >= 0; i--) {
+      const snapped = snapMrmsFrame(newest - i * step);
+      if (!snapped) continue;
+      const key = snapped.getTime();
+      if (seen.has(key)) continue; // collapse slots that snap to one frame
+      seen.add(key);
+      frames.push(snapped);
+    }
+    frames.sort((a, b) => a - b);
+    loopFrames = frames;
   }
 
   // Reveal frame i by flipping opacity — the layers are already loaded, so

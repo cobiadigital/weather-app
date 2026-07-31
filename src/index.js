@@ -2,13 +2,17 @@
  * Weather Radar — Cloudflare Worker
  *
  * Static assets (the front-end in /public) are served automatically by the
- * platform. This Worker only handles the `/api/nws/*` routes, which proxy the
- * National Weather Service API (https://api.weather.gov).
+ * platform. This Worker handles the API routes:
+ *   - /api/nws/*  — proxy the National Weather Service API (api.weather.gov)
+ *   - /api/nhc/*  — National Hurricane Center data for the /tropics page
+ *   - /api/mrms/* — NCEP's MRMS radar WMS re-served as {z}/{x}/{y} tiles
  *
- * Why proxy instead of calling api.weather.gov straight from the browser:
+ * Why proxy instead of calling these straight from the browser:
  *   - The NWS asks every client to send a descriptive User-Agent. Browsers
  *     don't let page JS override User-Agent, so we set it here.
- *   - We can cache responses at the edge to stay well within NWS rate limits.
+ *   - We can cache responses at the edge to stay well within upstream limits.
+ *   - For MRMS, we translate the map's tile coords into WMS GetMap bboxes and
+ *     bake the frame time into the tile URL so the client can cache frames.
  */
 
 const NWS_BASE = "https://api.weather.gov";
@@ -21,6 +25,17 @@ const NWS_BASE = "https://api.weather.gov";
 //  - NOAA tropical MapServer: official cone + coastal wind watches/warnings as
 //    queryable GeoJSON (no KMZ). Arrival / probabilistic-wind / inundation
 //    products are loaded client-side via MapServer /export (see tropics.js).
+// NCEP GeoServer — MRMS "Quality Controlled 1km CONUS Base Reflectivity"
+// (conus_bref_qcd). Unlike IEM's tile cache, NCEP only speaks WMS GetMap
+// (render an arbitrary bbox), so the /api/mrms/* routes below turn it into the
+// {z}/{x}/{y} tile scheme the map already uses, with the frame time baked into
+// the URL (?t=) so live tiles and loop tiles share cache keys. See app.js.
+const MRMS_WMS =
+  "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows";
+const MRMS_LAYER = "conus_bref_qcd";
+// Half-width of the web-mercator (EPSG:3857) world square, in metres.
+const WEB_MERCATOR_MAX = 20037508.342789244;
+
 const NHC_CURRENT_URL = "https://www.nhc.noaa.gov/CurrentStorms.json";
 const NHC_ADECK_BASE = "https://ftp.nhc.noaa.gov/atcf/aid_public/";
 const NHC_MAPSERVER =
@@ -46,6 +61,10 @@ export default {
 
     if (pathname.startsWith("/api/nhc/")) {
       return handleNHC(request, url);
+    }
+
+    if (pathname.startsWith("/api/mrms/")) {
+      return handleMRMS(request, url);
     }
 
     // Anything else that reaches the Worker (i.e. not a static asset) is a 404.
@@ -389,6 +408,136 @@ function decodeCoord(s) {
   let v = parseInt(m[1], 10) / 10;
   if (m[2] === "S" || m[2] === "W") v = -v;
   return v;
+}
+
+// ---------------------------------------------------------------------------
+// MRMS radar (/api/mrms/*) — NCEP GeoServer WMS re-served as XYZ tiles.
+// ---------------------------------------------------------------------------
+//
+//   GET /api/mrms/frames        -> { frames: [ISO8601, …] } newest last, the
+//                                  canonical times both the live view and the
+//                                  loop snap to (so their tile URLs match).
+//   GET /api/mrms/{z}/{x}/{y}.png?t=<ISO8601>
+//                               -> one 256px tile, rendered by NCEP for that
+//                                  tile's bbox at frame <t>. Immutable per
+//                                  (z,x,y,t), so it's cached hard at the edge.
+async function handleMRMS(request, url) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const sub = url.pathname.slice("/api/mrms/".length);
+  if (sub === "frames") return mrmsFrames();
+  const m = sub.match(/^(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/);
+  if (m) {
+    return mrmsTile(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10),
+      parseInt(m[3], 10),
+      url.searchParams.get("t")
+    );
+  }
+  return json({ error: "Not found" }, 404);
+}
+
+// The layer's advertised TIME dimension is a rolling ~2h list of ~2-minute
+// frames. We read it from GetCapabilities and hand back a sorted array.
+async function mrmsFrames() {
+  let upstream;
+  try {
+    upstream = await fetch(
+      MRMS_WMS + "?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities",
+      {
+        headers: { "User-Agent": USER_AGENT },
+        cf: { cacheTtl: 60, cacheEverything: true },
+      }
+    );
+  } catch (_) {
+    return json({ frames: [] }, 200, 30);
+  }
+  if (!upstream.ok) return json({ frames: [] }, 200, 30);
+
+  let xml;
+  try {
+    xml = await upstream.text();
+  } catch (_) {
+    return json({ frames: [] }, 200, 30);
+  }
+  return json({ frames: parseTimeDimension(xml) }, 200, 30);
+}
+
+// Pull the comma-separated instants out of <Dimension name="time">…</Dimension>
+// and return the well-formed ISO ones, oldest first.
+function parseTimeDimension(xml) {
+  const m = xml.match(/<Dimension[^>]*name="time"[^>]*>([\s\S]*?)<\/Dimension>/i);
+  if (!m) return [];
+  const times = m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(s));
+  times.sort();
+  return times;
+}
+
+async function mrmsTile(z, x, y, rawTime) {
+  // Bounds-check the tile coords (guards the bbox math and the upstream URL).
+  const dim = Math.pow(2, z);
+  if (z < 0 || z > 20 || x < 0 || y < 0 || x >= dim || y >= dim) {
+    return new Response("Bad tile", { status: 400 });
+  }
+
+  const params = new URLSearchParams({
+    SERVICE: "WMS",
+    VERSION: "1.1.1", // 1.1.1 keeps BBOX axis order x,y for every CRS
+    REQUEST: "GetMap",
+    LAYERS: MRMS_LAYER,
+    STYLES: "",
+    SRS: "EPSG:3857",
+    BBOX: tileBBox3857(z, x, y).join(","),
+    WIDTH: "256",
+    HEIGHT: "256",
+    FORMAT: "image/png",
+    TRANSPARENT: "true",
+  });
+  // A frame time is optional; when valid it pins the frame (and makes the tile
+  // immutable). Anything malformed is dropped so we fall back to "latest".
+  const t = String(rawTime || "");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(t)) {
+    params.set("TIME", t);
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(MRMS_WMS + "?" + params.toString(), {
+      headers: { "User-Agent": USER_AGENT },
+      // (z,x,y,t) names one immutable image, so cache it hard at the edge.
+      cf: { cacheTtl: 3600, cacheEverything: true },
+    });
+  } catch (_) {
+    return new Response("Upstream error", { status: 502 });
+  }
+  if (!upstream.ok) {
+    return new Response("Upstream error", { status: 502 });
+  }
+
+  const body = await upstream.arrayBuffer();
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") || "image/png");
+  headers.set("access-control-allow-origin", "*");
+  // Past frames never change; give clients a long TTL (they evict by the 2h
+  // window themselves). Untimed "latest" tiles get a short TTL instead.
+  headers.set(
+    "cache-control",
+    params.has("TIME") ? "public, max-age=86400, immutable" : "public, max-age=120"
+  );
+  return new Response(body, { status: 200, headers });
+}
+
+// Web-mercator bbox (minx,miny,maxx,maxy, metres) of XYZ tile z/x/y.
+function tileBBox3857(z, x, y) {
+  const span = (2 * WEB_MERCATOR_MAX) / Math.pow(2, z);
+  const minx = -WEB_MERCATOR_MAX + x * span;
+  const maxy = WEB_MERCATOR_MAX - y * span;
+  return [minx, maxy - span, minx + span, maxy];
 }
 
 function json(obj, status = 200, cacheSeconds = 0) {
