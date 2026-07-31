@@ -22,7 +22,7 @@
   const RADAR_PRODUCTS = {
     base: {
       id: "base",
-      label: "Base Reflectivity",
+      label: "Base Reflectivity (NEXRAD)",
       layer: "nexrad-n0q-900913",
       attribution:
         'Radar: <a href="https://mesonet.agron.iastate.edu/">Iowa Env. Mesonet</a> / NWS NEXRAD',
@@ -71,7 +71,7 @@
       loop: null,
     },
   };
-  const DEFAULT_PRODUCT = "base";
+  const DEFAULT_PRODUCT = "mrms";
 
   // GOES East infrared composite from IEM. This is *satellite* cloud imagery
   // (NOT part of the NEXRAD radar product) — infrared shows cloud cover day and
