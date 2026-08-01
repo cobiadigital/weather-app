@@ -226,15 +226,40 @@ you change the icon, regenerate all sizes (192, 512, maskable-512, 180 apple).
 
 ## Conventions & constraints
 
+### Mobile first — this is the top constraint, not one of many
+
+**~99% of real usage is on a phone.** Every design decision — layout, type
+size, hit areas, spacing, wording length — is made for a one-handed phone user
+first. Desktop is an afterthought that happens to work, never the case you
+design around. When the two conflict, the phone wins, every time.
+
+Concretely, before you consider any UI change done:
+
+- **Tap targets are ≥44px, and 48px is the house default.** `.btn` already sets
+  `min-height: 48px` — match it. Do **not** reuse `.icon-btn` (34px) for
+  anything a user has to hit deliberately; it's sized for a compact glyph in a
+  header, not for an action button. A 34px control is a bug, not a style
+  choice.
+- **Text controls get real padding and ≥14px type.** 12px labels crammed into a
+  pill are unreadable at arm's length in daylight.
+- **Don't crowd a row.** A message plus two buttons on one line collapses badly
+  at 390px. Stack, wrap, or give the actions their own full-width row.
+- **Respect the safe-area insets** (`env(safe-area-inset-*)`), the `100dvh`
+  usage, and the no-rubber-band-scroll setup.
+- **Test at a narrow viewport** (390×844 or smaller) — not just a desktop
+  window that happens to be narrow. The headless-Chromium harness used for the
+  radar work runs at that size; keep it that way.
+- Prefer putting new chrome **inside `<footer class="controls">`**, whose flex
+  column already handles safe-area spacing and reflows as rows appear and
+  collapse. Floating elements with hard-coded offsets collide the moment
+  another row (like the loop bar) turns on.
+
 - **No build step.** Keep it that way — dashboard Git deploys run
   `npx wrangler deploy` with an empty build command. Don't introduce a bundler
   or framework unless explicitly asked.
 - **Vanilla JS**, IIFE-wrapped in `app.js`. Match the existing plain-DOM,
   no-dependency style. Escape any NWS-supplied text before inserting it into
   the DOM (see `esc()`).
-- **Mobile-first / iOS Safari.** Preserve the safe-area insets
-  (`env(safe-area-inset-*)`), `100dvh` usage, ≥44–48px tap targets, and the
-  no-rubber-band-scroll setup. Test changes against a narrow (phone) viewport.
 - If you bump the Leaflet version, recompute the SRI `integrity` hashes in
   `index.html` (unpkg is blocked in this sandbox; fetch the file from the npm
   registry via `npm pack leaflet@<ver>` and hash `dist/` with

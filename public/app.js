@@ -1227,8 +1227,9 @@
 
     const nearRow = siteData[near.id];
     showSitePickBar(
-      "Outside " + p.site.site.toUpperCase() + " range · Nearest: " + nearRow[2],
-      { label: "Switch", site: near.id }
+      "You're outside " + p.site.name + " (" + p.site.site.toUpperCase() + ") radar range.",
+      // Name the destination — a bare "Switch" doesn't say switch to what.
+      { label: "Use " + nearRow[2], site: near.id }
     );
   }
 
