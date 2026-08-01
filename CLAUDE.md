@@ -280,11 +280,18 @@ name becomes `-`) plus a per-version URL, both posted to the PR by the
 Cloudflare GitHub app. The branch URL is stable across commits; the version one
 changes every build, so prefer the branch URL when sharing.
 
-⚠️ A preview URL only keeps a branch **off production** if the Workers Builds
-non-production deploy command is `npx wrangler versions upload`. The default
-`npx wrangler deploy` publishes to production from whatever branch it builds —
-with non-production builds on, that means any branch push overwrites
-bendar.app. Check this setting before assuming a branch is safely sandboxed.
+Branch aliases exist only when the build runs
+`wrangler versions upload --preview-alias`, which Workers Builds does for
+non-production branches by default (`npx wrangler deploy` is the *production*
+branch default, and it publishes live).
+
+⚠️ **Don't assume a branch is sandboxed.** If the branch alias 404s and pushing
+the branch changes bendar.app, the branch is being built through the production
+path. Check Settings → Build: (1) Branch control's production branch is `main`
+and not a pattern matching feature branches, and (2) the non-production deploy
+command is still `npx wrangler versions upload`. Verify by timing a push
+against the Worker's `modified_on` — if it moves within a minute or two of a
+*branch* push, that branch is deploying live.
 
 ## Local dev (optional)
 

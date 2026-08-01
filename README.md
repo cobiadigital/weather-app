@@ -136,11 +136,20 @@ https://<version-id>-weather-app.<your-subdomain>.workers.dev    pinned to one b
 `claude/my-feature` → `claude-my-feature-weather-app.…`. The Cloudflare GitHub
 app posts both links as a pull-request comment.
 
-> **Set the non-production deploy command to `npx wrangler versions upload`.**
-> The default `npx wrangler deploy` publishes to **production** from whatever
-> branch it builds — so with non-production builds enabled, pushing any branch
-> would overwrite the live site. `versions upload` uploads a version (giving it
-> a preview URL) without promoting it to production.
+Branch aliases are minted only by `wrangler versions upload --preview-alias`,
+which Workers Builds runs automatically for non-production branches — the
+**non-production deploy command defaults to `npx wrangler versions upload`**
+(the `npx wrangler deploy` default applies to the *production* branch only).
+
+> **If a branch alias 404s and pushing a branch updates the live site**, the
+> branch is being built through the production path. Check two settings under
+> Settings → Build:
+>
+> 1. **Branch control** — the production branch must be `main`, not a pattern
+>    that also matches feature branches.
+> 2. **Non-production deploy command** — must be `npx wrangler versions upload`.
+>    If it was overridden to `npx wrangler deploy`, every branch build publishes
+>    to production and no alias is created.
 
 ## Local development (optional)
 
