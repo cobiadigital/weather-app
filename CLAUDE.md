@@ -32,8 +32,12 @@ Assets**. All data is public and comes from NOAA / the NWS.
 
 ## Data sources
 
-The **default** radar product is MRMS (the "Radar (MRMS, cached)" bullet below);
-the IEM products here are the others in the settings sheet. All are selectable.
+The settings sheet has 5 selectable radar products: **Base Reflectivity
+(MRMS)** (the default), **Base Reflectivity (NEXRAD)**, **Composite
+Reflectivity**, **Precipitation Type**, and **Echo Tops**. The 4 MRMS-backed
+ones share the Worker-proxied, cached pipeline below (the "Radar (MRMS,
+cached)" bullet); NEXRAD base reflectivity is IEM-sourced with its own
+time-enabled WMS loop (the next bullet).
 
 - **Radar tiles (IEM NEXRAD, live)** — Iowa Environmental Mesonet NEXRAD N0Q
   composite (the "Base Reflectivity (NEXRAD)" product):
@@ -53,38 +57,57 @@ the IEM products here are the others in the settings sheet. All are selectable.
   previous, coarser wave has finished, and the animating set grows as each wave
   lands, so the loop densifies mid-play without ever waiting on a blank frame.
   It's a different endpoint than the live tile cache above.
-- **Radar (MRMS, cached — the default)** — the **Base Reflectivity (MRMS)**
-  product is the default on page open (`DEFAULT_PRODUCT = "mrms"`), served
-  through our own Worker rather than IEM. NCEP's GeoServer only speaks WMS
-  `GetMap` (arbitrary bbox), so the Worker re-tiles it as `{z}/{x}/{y}` and
-  **bakes the frame time into the URL**:
-  - `GET /api/mrms/frames` → the layer's advertised `time` dimension (a rolling
-    ~2 h list of ~2-minute instants) as a sorted ISO array. Both the live view
-    and the loop snap to these canonical times.
-  - `GET /api/mrms/{z}/{x}/{y}.png?t=<iso>` → one 256px tile, rendered by NCEP
-    for that tile's EPSG:3857 bbox at frame `t` (WMS 1.1.1, so BBOX axis order
-    is x,y). Immutable per `(z,x,y,t)`, so it's edge-cached hard.
+- **Radar (MRMS, cached)** — NCEP's GeoServer (`opengeo.ncep.noaa.gov`,
+  `conus` workspace) publishes exactly 4 MRMS layers, and all 4 are wired up as
+  products, each `RADAR_PRODUCTS` entry naming its Worker route key via
+  `mrmsLayer` (see `MRMS_LAYERS` in `src/index.js` for the real GeoServer layer
+  name each maps to):
+  - `mrmsLayer: "base"` → `conus_bref_qcd` — **Base Reflectivity (MRMS)**, the
+    default on page open (`DEFAULT_PRODUCT = "mrms"`).
+  - `mrmsLayer: "composite"` → `conus_cref_qcd` — **Composite Reflectivity**.
+  - `mrmsLayer: "ptype"` → `conus_pcpn_typ` — **Precipitation Type**.
+  - `mrmsLayer: "eet"` → `conus_neet_v18` — **Echo Tops**.
 
-  Because the live tile URL now carries the timestamp (IEM's live tile is
+  NCEP's GeoServer only speaks WMS `GetMap` (arbitrary bbox), so the Worker
+  re-tiles each layer as `{z}/{x}/{y}` and **bakes the frame time into the
+  URL**:
+  - `GET /api/mrms/{product}/frames` → that layer's advertised `time`
+    dimension (a rolling ~2 h list of ~2-minute instants) as a sorted ISO
+    array. `{product}` is one of `base`/`composite`/`ptype`/`eet`. Both the
+    live view and the loop snap to these canonical times.
+  - `GET /api/mrms/{product}/{z}/{x}/{y}.png?t=<iso>` → one 256px tile,
+    rendered by NCEP for that tile's EPSG:3857 bbox at frame `t` (WMS 1.1.1, so
+    BBOX axis order is x,y). Immutable per `(product,z,x,y,t)`, so it's
+    edge-cached hard. `{product}` is checked against the `MRMS_LAYERS`
+    allowlist before being used to build the upstream request.
+
+  Because the live tile URL now carries the timestamp (IEM's live tiles are
   timeless), a frame the live view fetched can be **reused by the loop**.
-  `app.js` wraps the MRMS layers in a `cachedTileLayer` (a `L.TileLayer`
-  subclass) that reads/writes the **Cache Storage API** (`mrms-tiles-v1`):
-  cache-first tile loads, so tapping **Loop 2h** replays frames already on the
-  device with no re-download, and the cache persists across reloads. The live
-  view pins to the newest canonical frame (re-pinned on each 5-min refresh, the
-  same cadence at which the cache accumulates frames), and the loop's newest
-  slot snaps to that exact frame — guaranteeing the current view is a cache hit.
-  Entries older than the 2 h window are evicted. Everything degrades to plain
-  network tiles where Cache Storage is unavailable (e.g. private mode).
+  `app.js` wraps every MRMS layer in a `cachedTileLayer` (a `L.TileLayer`
+  subclass) that reads/writes the **Cache Storage API** (`mrms-tiles-v1`,
+  shared across all 4 products — the URL's `{product}` segment keeps entries
+  distinct): cache-first tile loads, so tapping **Loop 2h** replays frames
+  already on the device with no re-download, and the cache persists across
+  reloads. The live view pins to the newest canonical frame for its product
+  (re-pinned on each 5-min refresh, the same cadence at which the cache
+  accumulates frames), and the loop's newest slot snaps to that exact frame —
+  guaranteeing the current view is a cache hit. Entries older than the 2 h
+  window are evicted (by frame time, regardless of product). Everything
+  degrades to plain network tiles where Cache Storage is unavailable (e.g.
+  private mode). Frame lists are memoized per product (`mrmsFramesByLayer`,
+  keyed by `mrmsLayer`), since each product updates on its own schedule.
 
-  MRMS `conus_bref_qcd` covers the **lower 48 only**. When the map is centered
-  outside CONUS (Alaska, Hawaii, Puerto Rico, …) the MRMS *default* silently
-  falls back to the IEM NEXRAD product, which aggregates the OCONUS radars.
-  `app.js` splits `selectedProduct()` (the persisted choice, drives the
-  settings radio) from `currentProduct()` → `effectiveProductId()` (what's
-  shown; applies the fallback). The live layer is rebuilt on every `moveend`
-  that crosses the CONUS box; the fallback only applies to the MRMS default,
-  not to an explicitly-chosen product.
+  All 4 MRMS layers cover the **lower 48 only**. When the map is centered
+  outside CONUS (Alaska, Hawaii, Puerto Rico, …), each MRMS-backed product
+  silently falls back to the product it replaced: `MRMS_FALLBACK` maps
+  `mrms → base` (IEM NEXRAD, a visible product in its own right) and
+  `composite/ptype/eet → …Iem` (hidden `RADAR_PRODUCTS` entries — the original
+  IEM configs, not rendered in settings, that these products replaced — see
+  `compositeIem`/`ptypeIem`/`eetIem`). `app.js` splits `selectedProduct()` (the
+  persisted choice, drives the settings radio) from `currentProduct()` →
+  `effectiveProductId()` (what's shown; applies the fallback). The live layer
+  is rebuilt on every `moveend` that crosses the CONUS box; the fallback only
+  applies to MRMS-backed products, not to an explicitly-chosen IEM product.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES

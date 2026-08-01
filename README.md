@@ -11,9 +11,9 @@ All data is public and comes from **NOAA / the National Weather Service**:
 
 - **Radar** — the default is **NOAA MRMS** quality-controlled base reflectivity
   (1 km, ~2-min updates), served through the Worker as on-device-cached tiles.
-  A NEXRAD composite and other products (composite reflectivity, precip type,
-  echo tops) from the
-  [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/) are also
+  Composite reflectivity, precipitation type, and echo tops are also MRMS,
+  same pipeline. A NEXRAD base-reflectivity composite from the
+  [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/) is also
   selectable in settings.
 - **Alerts** — the [NWS API](https://www.weather.gov/documentation/services-web-api)
   (`api.weather.gov`), proxied through the Worker so it can send a proper
@@ -22,8 +22,10 @@ All data is public and comes from **NOAA / the National Weather Service**:
 ## Features
 
 - Full-screen dark map with a live radar overlay (NOAA MRMS by default)
-- **Radar products** — a settings sheet to switch base reflectivity (MRMS or
-  NEXRAD), composite reflectivity, precipitation type, or echo tops
+- **Radar products** — a settings sheet to switch between base reflectivity
+  (MRMS or NEXRAD), composite reflectivity, precipitation type, and echo tops
+  (composite/precip-type/echo-tops are all MRMS-backed, with the same cached
+  live view + 2-hour loop as base reflectivity)
 - **My location** button (uses your device GPS) and remembers your last spot.
   Once a location is set, the location controls collapse to a small pin in the
   top bar (tap it to re-center or change location)
@@ -43,18 +45,22 @@ All data is public and comes from **NOAA / the National Weather Service**:
 
 ## Data sources
 
-- **Radar (default: MRMS, cached)** — NOAA's **MRMS** quality-controlled base
-  reflectivity (`conus_bref_qcd`, 1 km, ~2-min updates), served through the
-  Worker, which re-tiles NCEP's WMS as `{z}/{x}/{y}` and bakes the frame time
-  into the URL. The live view and the 2-hour loop share an on-device tile cache
-  (Cache Storage API), so frames you've already viewed replay in the loop with
-  no re-download. MRMS is CONUS-only, so outside the lower 48 the default falls
-  back to the IEM NEXRAD product.
-- **Radar (IEM products)** — the NEXRAD N0Q base-reflectivity composite, the
-  MRMS hybrid-scan composite, HRRR precipitation type, and echo tops, all tiled
-  by the [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/). The
-  NEXRAD base product's 2-hour loop uses IEM's time-enabled WMS (`n0q-t.cgi`),
-  preloading 24 frames (5-minute spacing) in progressive dyadic waves.
+- **Radar (MRMS, cached)** — NOAA's **MRMS** quality-controlled products (1 km,
+  ~2-min updates) served through the Worker, which re-tiles NCEP's WMS as
+  `{z}/{x}/{y}` and bakes the frame time into the URL: base reflectivity
+  (`conus_bref_qcd`, the default), composite reflectivity (`conus_cref_qcd`),
+  precipitation type (`conus_pcpn_typ`), and echo tops (`conus_neet_v18`) — the
+  full set NCEP publishes at this access point. For each, the live view and the
+  2-hour loop share an on-device tile cache (Cache Storage API), so frames
+  you've already viewed replay in the loop with no re-download. MRMS is
+  CONUS-only, so outside the lower 48 each product falls back to the IEM
+  product it replaced.
+- **Radar (IEM products)** — the NEXRAD N0Q base-reflectivity composite from
+  the [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/), a
+  selectable alternative to MRMS base reflectivity; its 2-hour loop uses IEM's
+  time-enabled WMS (`n0q-t.cgi`), preloading 24 frames (5-minute spacing) in
+  progressive dyadic waves. IEM also supplies the (non-selectable) off-CONUS
+  fallback for the MRMS composite/precip-type/echo-tops products.
 - **Clouds** — GOES East infrared satellite composite, also from IEM. This is a
   separate *satellite* product (it shows cloud cover, not precipitation); the
   NEXRAD radar product does not include cloud coverage.
