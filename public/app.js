@@ -2,9 +2,12 @@
    Bendar.app — front-end logic.
 
    - Leaflet map with an OpenStreetMap base layer.
-   - Radar overlays from the Iowa Environmental Mesonet (IEM): NEXRAD base
-     reflectivity / echo tops, MRMS composite reflectivity, and HRRR precip
-     type. Product choice lives in the gear-icon settings sheet.
+   - Radar overlays, chosen in the gear-icon settings sheet:
+       * NOAA MRMS CONUS mosaics (the default) and any individual NEXRAD /
+         TDWR radar site, both proxied and re-tiled by our Worker (see
+         src/index.js) and cached on-device by frame time.
+       * Iowa Environmental Mesonet (IEM) NEXRAD tiles, kept as a selectable
+         product and as the off-CONUS fallback for the MRMS mosaics.
    - Active weather alerts + nearest-station conditions via the NWS API,
      proxied through this Worker at /api/nws/* (see src/index.js).
 ---------------------------------------------------------------------------- */
@@ -114,8 +117,61 @@
   // product — see RADAR_PRODUCTS' mrmsLayer) and {t} (the frame time both the
   // live layer and the loop pin to — identical URLs => Cache Storage hits).
   const MRMS_TILE_URL = "/api/mrms/{layer}/{z}/{x}/{y}.png?t={t}";
-  const mrmsFramesUrl = (layerKey) => "/api/mrms/" + layerKey + "/frames";
-  const MRMS_CACHE_NAME = "mrms-tiles-v1";
+  // v2: v1 could hold entries with an unparseable ?t= that the old eviction
+  // predicate never removed (see evictTileCache). Renaming starts them clean.
+  const MRMS_CACHE_NAME = "mrms-tiles-v2";
+
+  // Single radar sites (also via our Worker). Same timestamped-tile contract as
+  // MRMS, but the URL carries which radar as well as which product.
+  const SITE_TILE_URL = "/api/site/{site}/{product}/{z}/{x}/{y}.png?t={t}";
+  const SITES_URL = "/radar-sites.json";
+  const SITE_LEGEND_URL = (product) => "/api/legend/" + product + ".png";
+  // Shape gate for a persisted site selection ("site:kmob:sr_bref"). This runs
+  // before the site table has loaded, so it only proves the string is *safe* —
+  // that the site really exists is checked once the table arrives.
+  const SITE_PRODUCT_ID_RE = /^site:([kpt][a-z0-9]{3}):([a-z0-9_]{4,7})$/;
+  // Products each radar type carries (see MRMS/SITE_PRODUCTS in src/index.js).
+  // type: 0 = WSR-88D (NEXRAD), 1 = TDWR.
+  const SITE_PRODUCTS = {
+    sr_bref: {
+      label: "Base Reflectivity",
+      desc: "Super-res precipitation intensity",
+      type: 0,
+    },
+    sr_bvel: {
+      label: "Base Velocity",
+      desc: "Radial motion — reveals rotation",
+      type: 0,
+    },
+    bdhc: {
+      label: "Hydrometeor Type",
+      desc: "Dual-pol rain / snow / hail classification",
+      type: 0,
+    },
+    bdsa: {
+      label: "Storm Total Precip",
+      desc: "Dual-pol accumulation (totals, not motion)",
+      type: 0,
+    },
+    boha: {
+      label: "1-Hour Accumulation",
+      desc: "Surface rainfall, past hour (totals, not motion)",
+      type: 0,
+    },
+    bref1: { label: "Base Reflectivity", desc: "TDWR precipitation intensity", type: 1 },
+    brefl: { label: "Long-Range Reflectivity", desc: "TDWR wide-area view", type: 1 },
+    bvel: { label: "Base Velocity", desc: "TDWR radial motion", type: 1 },
+  };
+  // Opened first when a site is picked. bref1 only spans ~1°, so TDWR defaults
+  // to the long-range product.
+  const SITE_DEFAULT_PRODUCT = { 0: "sr_bref", 1: "brefl" };
+  // Usable range, for the coverage ring and the out-of-range hint. TDWR is a
+  // terminal-area radar; its long-range product reaches further than the rest.
+  const SITE_RANGE_KM = { 0: 230, 1: 90 };
+  const SITE_RANGE_KM_BY_PRODUCT = { brefl: 180 };
+  // Markers rendered while picking: viewport-culled, then capped. Keeps the
+  // zoomed-out map readable and bounds the work per pan.
+  const SITE_MARKER_MAX = 80;
   // All 4 MRMS layers (conus_bref_qcd, conus_cref_qcd, conus_pcpn_typ,
   // conus_neet_v18) cover the lower 48 only. Outside this box (Alaska, Hawaii,
   // Puerto Rico, …) an MRMS-backed product silently falls back to the
@@ -163,8 +219,20 @@
   const LOOP_PLAY_MS = 200;
   const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
   const LOOP_SAFETY_MS = 25000; // play the coarse wave even if a frame stalls
-  // Keep cached MRMS tiles a little past the loop window, then evict.
+  // Keep cached tiles a little past the loop window, then evict.
   const MRMS_CACHE_WINDOW_MS = (LOOP_HOURS * 60 + 20) * 60 * 1000;
+  // …and cap the total, because the time window alone doesn't bound size. With
+  // 201 radar sites x 8 products, sweeping through a few sites would otherwise
+  // pile up hundreds of MB inside the 2h window — enough for iOS Safari to
+  // evict our whole bucket. One full loop is ~288 tiles at ~30 KB, so 800
+  // entries (~23 MB) holds the active loop plus live browsing.
+  const TILE_CACHE_MAX_ENTRIES = 800;
+  // Trim below the cap so a sweep isn't re-triggered by the very next tile.
+  const TILE_CACHE_TRIM_TO = 600;
+  // Advisory backstop: if the whole origin is using more than this (or most of
+  // its quota), trim harder. navigator.storage.estimate() is approximate and
+  // covers more than our cache, so it only ever tightens, never relaxes.
+  const TILE_CACHE_MAX_BYTES = 60 * 1024 * 1024;
 
   const els = {
     status: document.getElementById("status"),
@@ -184,6 +252,15 @@
     settingsSheet: document.getElementById("settingsSheet"),
     settingsClose: document.getElementById("settingsClose"),
     radarProductOptions: document.getElementById("radarProductOptions"),
+    siteProductOptions: document.getElementById("siteProductOptions"),
+    sitePickBtn: document.getElementById("sitePickBtn"),
+    sitePickDesc: document.getElementById("sitePickDesc"),
+    sitePickBar: document.getElementById("sitePickBar"),
+    sitePickMsg: document.getElementById("sitePickMsg"),
+    sitePickAction: document.getElementById("sitePickAction"),
+    sitePickCancel: document.getElementById("sitePickCancel"),
+    legendRow: document.getElementById("legendRow"),
+    legendImg: document.getElementById("legendImg"),
     installBtn: document.getElementById("installBtn"),
     installSheet: document.getElementById("installSheet"),
     installClose: document.getElementById("installClose"),
@@ -208,7 +285,26 @@
   let meMarker;
   let refreshTimer;
   let lastRefreshAt = 0; // Date.now() of the last actual radar refresh
-  let radarProductId = loadProductId(); // selected RADAR_PRODUCTS key
+
+  // Single-site radar state. Declared before radarProductId because
+  // loadProductId() resolves a stored "site:…" id through siteProduct(), which
+  // reads siteData/siteProductCache — if they were still in their temporal dead
+  // zone the throw would be swallowed and a saved site would silently reset.
+  let siteData = null; // { site: [lat, lon, name, type] } once loaded
+  let siteLoading = null; // in-flight fetch, so concurrent callers share one
+  const siteProductCache = new Map(); // composite id -> synthesized product
+  let sitePicking = false; // true while the map is in "tap a radar" mode
+  let siteMarkerLayer = null; // L.layerGroup of pickable markers
+  let selectedSiteMarker = null; // persistent marker for the chosen radar
+  let siteRangeRing = null; // its coverage circle
+  let siteMarkerTimer = null; // debounce for re-rendering markers on pan
+  // Composite id of a site whose frame list came back empty (radar offline).
+  // Drives a temporary fallback to the mosaic without touching the user's
+  // saved choice, so the site returns on its own when the radar does.
+  let siteOutage = null;
+  let siteRangeHintFor = null; // dedupes the out-of-range prompt
+
+  let radarProductId = loadProductId(); // RADAR_PRODUCTS key or "site:…" id
   let displayedProductId = null; // product the live radarLayer is built for
 
   // Radar-loop state.
@@ -229,11 +325,13 @@
   let loopActive = []; // sorted frame indices currently in the animation
   let loopStride = LOOP_STRIDES[0]; // spacing (in frames) of the active set
 
-  // MRMS canonical frame times, one list per mrmsLayer key (Date[], oldest ->
+  // Canonical frame times, one list per tile-source key (Date[], oldest ->
   // newest), memoized with a short TTL. Both the live view and the loop snap
   // to these so their tile URLs — and therefore their cache entries — line up
-  // exactly. Per-layer because each MRMS product updates on its own schedule.
-  const mrmsFramesByLayer = new Map(); // layerKey -> { frames: Date[], at: ms }
+  // exactly. Keyed per source because every product updates on its own
+  // schedule; MRMS keys are bare ("base"), site keys carry an underscore
+  // ("kmob_sr_bref"), so the two can never collide.
+  const framesByKey = new Map(); // key -> { frames: Date[], at: ms }
   const MRMS_FRAMES_TTL_MS = 60 * 1000;
 
   // Deferred PWA install prompt (Chrome/Android). Null on iOS Safari.
@@ -337,19 +435,36 @@
     radarLayer = buildRadarLayer().addTo(map);
     displayedProductId = effectiveProductId();
     lastRefreshAt = Date.now();
-    if (currentProduct().mrmsLayer) primeMrmsLive();
+    if (tileSource(currentProduct())) primeLive();
     syncProductUI();
     syncLoopAvailability();
 
-    // Re-evaluate the CONUS fallback whenever the view settles somewhere new.
-    map.on("moveend", onRadarViewChanged);
+    // Re-evaluate the CONUS fallback (or the site range hint) whenever the view
+    // settles somewhere new, and re-cull the pickable radar markers.
+    map.on("moveend", () => {
+      onRadarViewChanged();
+      if (sitePicking) {
+        clearTimeout(siteMarkerTimer);
+        siteMarkerTimer = setTimeout(renderSiteMarkers, 150);
+      }
+    });
+
+    // A restored single-site selection needs the site table before its marker,
+    // ring and real name can be resolved. Only fetched when one is in play.
+    if (siteProduct(radarProductId)) {
+      loadSiteData().then(verifyStoredSite).catch(() => {
+        /* leave the tiles running; only the name/ring are missing */
+      });
+    }
 
     if (saved) {
       setMeMarker(saved.lat, saved.lon);
       loadWeather(saved.lat, saved.lon);
     }
 
-    setStatus("Radar loaded.");
+    setStatus(
+      siteProduct(radarProductId) ? statusForCurrentProduct() : "Radar loaded."
+    );
     scheduleRefresh();
 
     // Stop re-centering the saved location the moment the user drags the map, so
@@ -382,25 +497,98 @@
 
   // --- Radar products ------------------------------------------------------
 
+  // Resolve a product id to its config. Ids are either a RADAR_PRODUCTS key
+  // ("mrms") or a single-site composite ("site:kmob:sr_bref"). `strict` returns
+  // null for an unknown id instead of falling back to the default.
+  function productById(id, strict) {
+    const p = RADAR_PRODUCTS[id] || siteProduct(id);
+    if (p) return p;
+    return strict ? null : RADAR_PRODUCTS[DEFAULT_PRODUCT];
+  }
+
   // The product the user picked (persisted). Distinct from the *effective*
-  // product below, which may differ when the MRMS default auto-falls-back.
+  // product below, which may differ when a product auto-falls-back.
   function selectedProduct() {
-    return RADAR_PRODUCTS[radarProductId] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+    return productById(radarProductId);
   }
 
   // The product actually shown. All the layer/loop/refresh code reads this, so
-  // the CONUS fallback flows through everywhere by changing this one function.
+  // both fallbacks (off-CONUS mosaic, offline site) flow through everywhere by
+  // changing this one function.
   function currentProduct() {
-    return RADAR_PRODUCTS[effectiveProductId()] || RADAR_PRODUCTS[DEFAULT_PRODUCT];
+    return productById(effectiveProductId());
   }
 
   function effectiveProductId() {
+    // A site whose radar isn't reporting shows the mosaic instead — an offline
+    // radar renders identically to clear skies, so this one is a correctness
+    // fix, not a preference. radarProductId is left alone, so the site comes
+    // back by itself once the radar does.
+    if (siteOutage && siteOutage === radarProductId) return DEFAULT_PRODUCT;
     const p = RADAR_PRODUCTS[radarProductId];
+    // Site products miss this lookup, so they never off-CONUS-fallback —
+    // correct, since a single radar is inherently regional (and Alaska,
+    // Hawaii and Puerto Rico sites are first-class here).
     if (p && p.mrmsLayer && map) {
       const c = map.getCenter();
       if (!inConus(c.lat, c.lng)) return MRMS_FALLBACK[radarProductId] || radarProductId;
     }
     return radarProductId;
+  }
+
+  // Build (and memoize) the product config for a "site:{site}:{product}" id.
+  // currentProduct() runs on every moveend, every opacity tick and 20+ times
+  // inside buildLoopLayers, so this must not allocate on the hot path.
+  function siteProduct(id) {
+    if (typeof id !== "string") return null;
+    const cached = siteProductCache.get(id);
+    if (cached) return cached;
+    const m = SITE_PRODUCT_ID_RE.exec(id);
+    if (!m) return null;
+    const site = m[1];
+    const product = m[2];
+    const meta = SITE_PRODUCTS[product];
+    if (!meta) return null;
+
+    // The site table may not have loaded yet; fall back to the bare id so the
+    // label is still sensible, and let syncSiteLabels() fill it in later.
+    const row = siteData && siteData[site];
+    const name = row ? row[2] : site.toUpperCase();
+    const built = {
+      id: id,
+      label: name + " (" + site.toUpperCase() + ") — " + meta.label,
+      site: { site: site, product: product, name: name, type: row ? row[3] : meta.type },
+      attribution:
+        'Radar: <a href="https://www.weather.gov/">NWS ' +
+        esc(site.toUpperCase()) +
+        "</a> via NCEP",
+      loop: true,
+    };
+    siteProductCache.set(id, built);
+    return built;
+  }
+
+  // Everything that uses the timestamped, Cache-Storage-backed tile pipeline
+  // resolves through here, so MRMS mosaics and single sites share one code
+  // path. Returns null for the plain IEM tile-cache products.
+  function tileSource(p) {
+    if (p.mrmsLayer) {
+      return {
+        key: p.mrmsLayer,
+        url: MRMS_TILE_URL,
+        vars: { layer: p.mrmsLayer },
+        frames: "/api/mrms/" + p.mrmsLayer + "/frames",
+      };
+    }
+    if (p.site) {
+      return {
+        key: p.site.site + "_" + p.site.product,
+        url: SITE_TILE_URL,
+        vars: { site: p.site.site, product: p.site.product },
+        frames: "/api/site/" + p.site.site + "/" + p.site.product + "/frames",
+      };
+    }
+    return null;
   }
 
   function inConus(lat, lon) {
@@ -419,11 +607,22 @@
     return !!(p && p.mrmsLayer) && effectiveProductId() !== radarProductId;
   }
 
+  // Whether the selected radar site is offline and we're showing the mosaic.
+  function siteFellBack() {
+    return !!siteOutage && siteOutage === radarProductId;
+  }
+
   // Map settled somewhere new: if that flipped the effective product (crossed
-  // the CONUS edge under the MRMS default), swap the live layer to match. The
+  // the CONUS edge under an MRMS product), swap the live layer to match. The
   // loop manages its own layers, so skip while it's running.
   function onRadarViewChanged() {
     if (loopOn) return;
+    // A site's effective id doesn't change as you pan, so this has to come
+    // before the early return below or the range check would never run.
+    if (currentProduct().site) {
+      syncSiteRangeHint();
+      return;
+    }
     if (effectiveProductId() === displayedProductId) return;
     rebuildLiveLayer();
   }
@@ -433,13 +632,29 @@
     if (radarLayer) map.removeLayer(radarLayer);
     radarLayer = next.addTo(map);
     displayedProductId = effectiveProductId();
-    if (currentProduct().mrmsLayer) primeMrmsLive();
+    if (tileSource(currentProduct())) primeLive();
     syncLoopAvailability();
-    setStatus(
-      mrmsFellBack()
-        ? "Outside MRMS coverage — showing " + currentProduct().label + "."
-        : "Showing " + currentProduct().label + "."
-    );
+    syncSiteMarker();
+    syncLegend();
+    setStatus(statusForCurrentProduct());
+  }
+
+  // One place for "what are we actually showing", since several call sites need
+  // to explain a substitution when one is in effect. `phrase` shapes the normal
+  // case ("Showing X." / "X loaded." / "Showing live X.").
+  function statusForCurrentProduct(phrase) {
+    const shown = currentProduct().label;
+    if (siteFellBack()) {
+      const picked = siteProduct(radarProductId);
+      const who = picked
+        ? picked.site.name + " (" + picked.site.site.toUpperCase() + ")"
+        : "That radar";
+      return who + " isn't reporting — showing " + shown + ".";
+    }
+    if (mrmsFellBack()) return "Outside MRMS coverage — showing " + shown + ".";
+    if (phrase === "loaded") return shown + " loaded.";
+    if (phrase === "live") return "Showing live " + shown + ".";
+    return "Showing " + shown + ".";
   }
 
   function radarTileUrl(product, bustCache) {
@@ -451,18 +666,25 @@
 
   function buildRadarLayer() {
     const p = currentProduct();
-    if (p.mrmsLayer) {
-      // Pin to the current frame (a clock estimate until the frame list loads;
-      // primeMrmsLive() swaps in the exact canonical time right after).
-      return cachedTileLayer(MRMS_TILE_URL, {
-        layer: p.mrmsLayer,
-        t: isoUTC(mrmsLiveFrame(p.mrmsLayer)),
-        opacity: sliderToOpacity(els.opacity.value),
-        attribution: p.attribution,
-        zIndex: 5,
-        maxZoom: 15,
-        crossOrigin: "anonymous",
-      });
+    const src = tileSource(p);
+    if (src) {
+      // Pin to the newest canonical frame. Before the frame list has loaded
+      // there's no canonical time to use, so send an empty t= — the Worker
+      // treats that as "latest" rather than rendering a blank frame for a
+      // clock estimate that never matches. primeLive() pins the exact time as
+      // soon as the list arrives.
+      const frame = liveFrame(src.key);
+      return cachedTileLayer(
+        src.url,
+        Object.assign({}, src.vars, {
+          t: frame ? isoUTC(frame) : "",
+          opacity: sliderToOpacity(els.opacity.value),
+          attribution: p.attribution,
+          zIndex: 5,
+          maxZoom: 15,
+          crossOrigin: "anonymous",
+        })
+      );
     }
     return L.tileLayer(radarTileUrl(p, false), {
       opacity: sliderToOpacity(els.opacity.value),
@@ -533,52 +755,109 @@
     }
   }
 
-  // Drop cached tiles whose frame time (?t=) has aged out of the loop window.
-  async function evictMrmsCache() {
+  // The frame time baked into a cached tile URL, or NaN if it has none.
+  function cachedTileFrameMs(url) {
+    try {
+      const t = new URL(url).searchParams.get("t");
+      return t ? Date.parse(t) : NaN;
+    } catch (_) {
+      return NaN;
+    }
+  }
+
+  // Keep the tile cache bounded: first drop frames older than the loop window,
+  // then — because the window alone doesn't bound *size* — cap the entry count.
+  // Overflow is shed from the products the user isn't looking at, oldest frame
+  // first, so the active product's loop (the whole point of caching) survives.
+  async function evictTileCache() {
     if (!("caches" in window)) return;
     try {
       const cache = await caches.open(MRMS_CACHE_NAME);
       const cutoff = Date.now() - MRMS_CACHE_WINDOW_MS;
       const reqs = await cache.keys();
-      await Promise.all(
-        reqs.map((req) => {
-          const t = new URL(req.url).searchParams.get("t");
-          const ms = t ? Date.parse(t) : NaN;
-          return Number.isFinite(ms) && ms < cutoff ? cache.delete(req) : null;
-        })
-      );
+
+      // Pass 1: age out. An entry with no parseable ?t= can't be reasoned
+      // about, so drop it too rather than let it linger forever.
+      const live = [];
+      const aged = [];
+      for (const req of reqs) {
+        const ms = cachedTileFrameMs(req.url);
+        if (!Number.isFinite(ms) || ms < cutoff) aged.push(req);
+        else live.push({ req: req, ms: ms });
+      }
+      await Promise.all(aged.map((req) => cache.delete(req)));
+
+      // Pass 2: cap the total.
+      if (live.length <= TILE_CACHE_MAX_ENTRIES) return;
+      let trimTo = TILE_CACHE_TRIM_TO;
+      if (await storageUnderPressure()) trimTo = Math.floor(trimTo / 2);
+
+      const src = tileSource(currentProduct());
+      const activePrefix = src ? tileUrlPrefix(src) : null;
+      live.sort((a, b) => {
+        // Non-active products go first…
+        const aActive = activePrefix && a.req.url.indexOf(activePrefix) !== -1;
+        const bActive = activePrefix && b.req.url.indexOf(activePrefix) !== -1;
+        if (aActive !== bActive) return aActive ? 1 : -1;
+        // …then oldest frame first within each group.
+        return a.ms - b.ms;
+      });
+      const doomed = live.slice(0, live.length - trimTo);
+      await Promise.all(doomed.map((e) => cache.delete(e.req)));
     } catch (_) {
-      /* ignore */
+      /* ignore — caching is best-effort */
     }
   }
 
-  // Fetch + memoize the canonical MRMS frame list for one layer
+  // The path prefix every tile of one product shares, used to tell the active
+  // product's cache entries from the rest.
+  function tileUrlPrefix(src) {
+    return src.vars.site
+      ? "/api/site/" + src.vars.site + "/" + src.vars.product + "/"
+      : "/api/mrms/" + src.vars.layer + "/";
+  }
+
+  // Advisory: is the origin's storage close to full? Only ever tightens the
+  // trim target — estimate() is approximate and covers more than our cache.
+  async function storageUnderPressure() {
+    try {
+      if (!navigator.storage || !navigator.storage.estimate) return false;
+      const est = await navigator.storage.estimate();
+      if (!est || !est.usage) return false;
+      if (est.usage > TILE_CACHE_MAX_BYTES) return true;
+      return !!est.quota && est.usage / est.quota > 0.6;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Fetch + memoize one tile source's canonical frame list
   // (Date[], oldest -> newest).
-  async function ensureMrmsFrames(layerKey) {
-    const entry = mrmsFramesByLayer.get(layerKey);
+  async function ensureFrames(src) {
+    const entry = framesByKey.get(src.key);
     if (entry && entry.frames.length && Date.now() - entry.at < MRMS_FRAMES_TTL_MS) {
       return entry.frames;
     }
     try {
-      const resp = await fetch(mrmsFramesUrl(layerKey), { cache: "no-store" });
+      const resp = await fetch(src.frames, { cache: "no-store" });
       const data = await resp.json();
       const frames = (data.frames || [])
         .map((s) => new Date(s))
         .filter((d) => !isNaN(d.getTime()))
         .sort((a, b) => a - b);
       if (frames.length) {
-        mrmsFramesByLayer.set(layerKey, { frames, at: Date.now() });
+        framesByKey.set(src.key, { frames: frames, at: Date.now() });
       }
     } catch (_) {
       /* keep any previous list */
     }
-    return (mrmsFramesByLayer.get(layerKey) || {}).frames || [];
+    return (framesByKey.get(src.key) || {}).frames || [];
   }
 
-  // Nearest canonical frame to a target time for one layer; null before that
-  // layer's list has loaded.
-  function snapMrmsFrame(layerKey, targetMs) {
-    const frames = (mrmsFramesByLayer.get(layerKey) || {}).frames || [];
+  // Nearest canonical frame to a target time for one source; null before that
+  // source's list has loaded.
+  function snapFrame(key, targetMs) {
+    const frames = (framesByKey.get(key) || {}).frames || [];
     if (!frames.length) return null;
     let best = frames[0];
     let bestDist = Infinity;
@@ -593,31 +872,411 @@
   }
 
   // The frame the live view should show: newest canonical frame at/under the
-  // lag horizon (a clock estimate until the list loads).
-  function mrmsLiveFrame(layerKey) {
-    const target = Date.now() - LOOP_LAG_MIN * 60 * 1000;
-    return snapMrmsFrame(layerKey, target) || new Date(target);
+  // lag horizon. Null until the list loads — callers send an empty t= rather
+  // than guessing a time the server has no frame for.
+  function liveFrame(key) {
+    return snapFrame(key, Date.now() - LOOP_LAG_MIN * 60 * 1000);
   }
 
   // Load the frame list, then repoint the live layer at the exact canonical
-  // frame (so its tiles match the loop's) and evict stale cache entries.
-  async function primeMrmsLive() {
+  // frame (so its tiles match the loop's) and sweep the cache.
+  async function primeLive() {
     const p = currentProduct();
-    if (!p.mrmsLayer) return;
-    await ensureMrmsFrames(p.mrmsLayer);
+    const src = tileSource(p);
+    if (!src) return;
+    const frames = await ensureFrames(src);
+
+    // No frames for a site means the radar isn't reporting. Fall back to the
+    // mosaic (see effectiveProductId) rather than showing an empty map that
+    // looks exactly like clear skies.
+    if (p.site && !frames.length) {
+      if (siteOutage !== radarProductId) {
+        siteOutage = radarProductId;
+        rebuildLiveLayer();
+      }
+      return;
+    }
+    if (p.site && frames.length && siteOutage === radarProductId) {
+      siteOutage = null; // radar came back
+      rebuildLiveLayer();
+      return;
+    }
+
     if (currentProduct().id === p.id && radarLayer && !loopOn) {
       // redraw() (not setUrl) — the URL *template* is unchanged, only options.t
       // is, and Leaflet's setUrl skips the redraw when the template matches.
-      radarLayer.options.t = isoUTC(mrmsLiveFrame(p.mrmsLayer));
+      const frame = liveFrame(src.key);
+      radarLayer.options.t = frame ? isoUTC(frame) : "";
       radarLayer.redraw();
     }
-    evictMrmsCache();
+    evictTileCache();
+  }
+
+  // --- Single radar sites --------------------------------------------------
+
+  // Fetch the site table once and memoize it (also de-dupes concurrent calls).
+  // ~7 KB of {site: [lat, lon, name, type]}, only fetched when the user
+  // actually reaches for a site — a cold start on a mosaic never touches it.
+  function loadSiteData() {
+    if (siteData) return Promise.resolve(siteData);
+    if (!siteLoading) {
+      siteLoading = fetch(SITES_URL)
+        .then((res) => {
+          if (!res.ok) throw new Error("radar-sites " + res.status);
+          return res.json();
+        })
+        .then((data) => {
+          siteData = data;
+          // Labels built before the table arrived used the bare site id.
+          siteProductCache.clear();
+          return data;
+        })
+        .catch((err) => {
+          siteLoading = null; // allow a retry on the next attempt
+          throw err;
+        });
+    }
+    return siteLoading;
+  }
+
+  // Great-circle distance in km.
+  function distanceKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad;
+    const dLon = (lon2 - lon1) * rad;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  // Closest radar to a point. `type` restricts to WSR-88D (0) or TDWR (1).
+  // A linear scan of ~200 entries is microseconds; no spatial index needed.
+  function nearestSite(lat, lon, type) {
+    if (!siteData) return null;
+    let bestId = null;
+    let bestKm = Infinity;
+    for (const id in siteData) {
+      const row = siteData[id];
+      if (type != null && row[3] !== type) continue;
+      const km = distanceKm(lat, lon, row[0], row[1]);
+      if (km < bestKm) {
+        bestKm = km;
+        bestId = id;
+      }
+    }
+    return bestId ? { id: bestId, km: bestKm } : null;
+  }
+
+  // Usable range of the selected radar, for the coverage ring and range hint.
+  function siteRangeKm(site) {
+    return SITE_RANGE_KM_BY_PRODUCT[site.product] || SITE_RANGE_KM[site.type] || 230;
+  }
+
+  function siteProductIdFor(site, product) {
+    return "site:" + site + ":" + product;
+  }
+
+  // Products this radar type carries, in display order.
+  function productsForSiteType(type) {
+    return Object.keys(SITE_PRODUCTS).filter((k) => SITE_PRODUCTS[k].type === type);
+  }
+
+  // Once the table is available, make sure a restored selection names a real
+  // radar; drop back to the mosaic if it doesn't (decommissioned site, or a
+  // hand-edited localStorage value that passed the shape gate).
+  function verifyStoredSite() {
+    const p = siteProduct(radarProductId);
+    if (!p) return;
+    if (siteData && !siteData[p.site.site]) {
+      setRadarProduct(DEFAULT_PRODUCT);
+      setStatus("That radar site is no longer available — showing the mosaic.", true);
+      return;
+    }
+    // Rebuild the label/type now that the real name is known.
+    rebuildLiveLayer();
+    syncSiteProductUI();
+  }
+
+  // Render the product list for the selected radar. Unlike the mosaic list in
+  // index.html this has to be dynamic — which products exist depends on whether
+  // the radar is a WSR-88D or a TDWR.
+  function syncSiteProductUI() {
+    const group = els.siteProductOptions;
+    if (!group) return;
+    const p = siteProduct(radarProductId);
+    if (!p) {
+      group.classList.add("hidden");
+      group.innerHTML = "";
+      if (els.sitePickDesc) {
+        els.sitePickDesc.textContent = "Tap one NEXRAD or TDWR radar on the map";
+      }
+      return;
+    }
+
+    const site = p.site;
+    if (els.sitePickDesc) {
+      els.sitePickDesc.textContent =
+        site.name + " (" + site.site.toUpperCase() + ") · tap to change";
+    }
+
+    group.innerHTML = "";
+    productsForSiteType(site.type).forEach((key) => {
+      const meta = SITE_PRODUCTS[key];
+      const id = siteProductIdFor(site.site, key);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "settings-option";
+      btn.setAttribute("role", "radio");
+      btn.setAttribute("data-product", id);
+      btn.setAttribute("aria-checked", id === radarProductId ? "true" : "false");
+
+      const text = document.createElement("span");
+      text.className = "settings-option-text";
+      const title = document.createElement("span");
+      title.className = "settings-option-title";
+      title.textContent = meta.label;
+      const desc = document.createElement("span");
+      desc.className = "settings-option-desc";
+      desc.textContent = meta.desc;
+      text.appendChild(title);
+      text.appendChild(desc);
+
+      const check = document.createElement("span");
+      check.className = "settings-check";
+      check.setAttribute("aria-hidden", "true");
+      check.textContent = "✓";
+
+      btn.appendChild(text);
+      btn.appendChild(check);
+      group.appendChild(btn);
+    });
+    group.classList.remove("hidden");
+  }
+
+  // The persistent marker + coverage ring for the selected radar. The ring is
+  // the thing that makes "why is it blank over there" obvious before you have
+  // to ask, and it anchors the (radial) velocity products to their origin.
+  function syncSiteMarker() {
+    const p = siteProduct(radarProductId);
+    const row = p && siteData && siteData[p.site.site];
+    if (!p || !row || !map) {
+      if (selectedSiteMarker) {
+        map.removeLayer(selectedSiteMarker);
+        selectedSiteMarker = null;
+      }
+      if (siteRangeRing) {
+        map.removeLayer(siteRangeRing);
+        siteRangeRing = null;
+      }
+      return;
+    }
+
+    const latlng = [row[0], row[1]];
+    const radius = siteRangeKm({ product: p.site.product, type: row[3] }) * 1000;
+    if (!selectedSiteMarker) {
+      selectedSiteMarker = L.marker(latlng, {
+        icon: siteIcon(row[3], true),
+        keyboard: false,
+        interactive: false,
+        zIndexOffset: 400,
+      }).addTo(map);
+    } else {
+      selectedSiteMarker.setLatLng(latlng);
+      selectedSiteMarker.setIcon(siteIcon(row[3], true));
+    }
+    if (!siteRangeRing) {
+      siteRangeRing = L.circle(latlng, {
+        radius: radius,
+        interactive: false,
+        fill: false,
+        color: "#3b82f6",
+        weight: 1,
+        opacity: 0.35,
+        dashArray: "4 6",
+      }).addTo(map);
+    } else {
+      siteRangeRing.setLatLng(latlng);
+      siteRangeRing.setRadius(radius);
+    }
+  }
+
+  // Four shared divIcons — Leaflet calls createIcon() per marker, so reusing
+  // instances keeps 200 markers from meaning 200 allocations.
+  const siteIcons = {};
+  function siteIcon(type, selected) {
+    const key = (type === 1 ? "tdwr" : "wsr") + (selected ? "-sel" : "");
+    if (!siteIcons[key]) {
+      siteIcons[key] = L.divIcon({
+        className: "",
+        html:
+          '<div class="site-marker' +
+          (type === 1 ? " tdwr" : "") +
+          (selected ? " selected" : "") +
+          '"></div>',
+        iconSize: [12, 12],
+        iconAnchor: [6, 6],
+      });
+    }
+    return siteIcons[key];
+  }
+
+  function enterSitePicking() {
+    closeSettingsSheet();
+    loadSiteData()
+      .then(() => {
+        sitePicking = true;
+        siteRangeHintFor = null;
+        renderSiteMarkers();
+        showSitePickBar("Tap a radar site on the map", null);
+        setStatus("Choose a radar site.");
+      })
+      .catch(() => setStatus("Couldn't load the radar site list.", true));
+  }
+
+  function exitSitePicking() {
+    sitePicking = false;
+    clearTimeout(siteMarkerTimer);
+    if (siteMarkerLayer) {
+      map.removeLayer(siteMarkerLayer);
+      siteMarkerLayer = null;
+    }
+    hideSitePickBar();
+  }
+
+  // Markers for the radars in view. Culled to the viewport and capped, so a
+  // zoomed-out map stays readable and each pan does a bounded amount of work.
+  function renderSiteMarkers() {
+    if (!sitePicking || !siteData || !map) return;
+    if (siteMarkerLayer) map.removeLayer(siteMarkerLayer);
+    siteMarkerLayer = L.layerGroup();
+
+    const bounds = map.getBounds().pad(0.25);
+    const c = map.getCenter();
+    const visible = [];
+    for (const id in siteData) {
+      const row = siteData[id];
+      if (!bounds.contains([row[0], row[1]])) continue;
+      visible.push({ id: id, row: row, km: distanceKm(c.lat, c.lng, row[0], row[1]) });
+    }
+    visible.sort((a, b) => a.km - b.km);
+
+    const selected = siteProduct(radarProductId);
+    visible.slice(0, SITE_MARKER_MAX).forEach((s) => {
+      const isSel = selected && selected.site.site === s.id;
+      const marker = L.marker([s.row[0], s.row[1]], {
+        icon: siteIcon(s.row[3], isSel),
+        keyboard: false,
+        title: s.row[2] + " (" + s.id.toUpperCase() + ")",
+      });
+      marker.on("click", () => onSiteMarkerTap(s.id));
+      siteMarkerLayer.addLayer(marker);
+    });
+    siteMarkerLayer.addTo(map);
+  }
+
+  function onSiteMarkerTap(siteId) {
+    const row = siteData && siteData[siteId];
+    if (!row) return;
+    exitSitePicking();
+
+    // Keep the product the user was already looking at when the new radar also
+    // has it — someone comparing velocity across adjacent radars shouldn't get
+    // bounced back to reflectivity.
+    const prev = siteProduct(radarProductId);
+    const available = productsForSiteType(row[3]);
+    const product =
+      prev && available.indexOf(prev.site.product) !== -1
+        ? prev.site.product
+        : SITE_DEFAULT_PRODUCT[row[3]];
+    setRadarProduct(siteProductIdFor(siteId, product));
+  }
+
+  // Panning outside the radar's range leaves the map blank (the tiles are
+  // valid, just empty). Say so and offer the nearest radar — but never switch
+  // automatically: the user picked *this* radar, and swapping under them would
+  // invalidate the loop and rewrite their saved choice.
+  function syncSiteRangeHint() {
+    if (sitePicking) return;
+    const p = siteProduct(radarProductId);
+    if (!p || !siteData || !map || siteFellBack()) {
+      if (siteRangeHintFor) {
+        siteRangeHintFor = null;
+        hideSitePickBar();
+      }
+      return;
+    }
+    const row = siteData[p.site.site];
+    if (!row) return;
+
+    const c = map.getCenter();
+    const km = distanceKm(c.lat, c.lng, row[0], row[1]);
+    if (km <= siteRangeKm({ product: p.site.product, type: row[3] })) {
+      if (siteRangeHintFor) {
+        siteRangeHintFor = null;
+        hideSitePickBar();
+      }
+      return;
+    }
+
+    const near = nearestSite(c.lat, c.lng, null);
+    if (!near || near.id === p.site.site) return;
+    if (siteRangeHintFor === near.id) return; // already prompting for this one
+    siteRangeHintFor = near.id;
+
+    const nearRow = siteData[near.id];
+    showSitePickBar(
+      "Outside " + p.site.site.toUpperCase() + " range · Nearest: " + nearRow[2],
+      { label: "Switch", site: near.id }
+    );
+  }
+
+  function showSitePickBar(message, action) {
+    if (!els.sitePickBar) return;
+    els.sitePickMsg.textContent = message;
+    if (action) {
+      els.sitePickAction.textContent = action.label;
+      els.sitePickAction.setAttribute("data-site", action.site);
+      els.sitePickAction.classList.remove("hidden");
+    } else {
+      els.sitePickAction.classList.add("hidden");
+      els.sitePickAction.removeAttribute("data-site");
+    }
+    els.sitePickBar.classList.remove("hidden");
+  }
+
+  function hideSitePickBar() {
+    if (els.sitePickBar) els.sitePickBar.classList.add("hidden");
+  }
+
+  // The colour scale for the current single-site product. Mosaics don't get one.
+  function syncLegend() {
+    if (!els.legendRow || !els.legendImg) return;
+    const p = currentProduct();
+    if (!p.site) {
+      els.legendRow.classList.add("hidden");
+      return;
+    }
+    const src = SITE_LEGEND_URL(p.site.product);
+    // Only touch .src when it actually changes — otherwise the <img> re-decodes
+    // and flickers on every product switch.
+    if (els.legendImg.getAttribute("data-src") !== src) {
+      els.legendImg.setAttribute("data-src", src);
+      els.legendImg.src = src;
+    }
+    els.legendRow.classList.remove("hidden");
   }
 
   function loadProductId() {
     try {
       const id = localStorage.getItem(PRODUCT_STORE_KEY);
       if (id && RADAR_PRODUCTS[id]) return id;
+      // A stored single-site id is only shape-checked here — the site table
+      // hasn't loaded yet. That's enough to guarantee the value is *safe* (it
+      // can only ever yield a 4-char workspace and an allowlisted product);
+      // whether the radar actually exists is checked in verifyStoredSite().
+      if (id && siteProduct(id)) return id;
     } catch (_) {
       /* private mode / storage disabled — ignore */
     }
@@ -634,10 +1293,12 @@
 
   function syncProductUI() {
     const id = radarProductId; // reflect the user's choice, not the fallback
-    if (!els.radarProductOptions) return;
-    els.radarProductOptions.querySelectorAll("[data-product]").forEach((btn) => {
-      const on = btn.getAttribute("data-product") === id;
-      btn.setAttribute("aria-checked", on ? "true" : "false");
+    [els.radarProductOptions, els.siteProductOptions].forEach((group) => {
+      if (!group) return;
+      group.querySelectorAll("[data-product]").forEach((btn) => {
+        const on = btn.getAttribute("data-product") === id;
+        btn.setAttribute("aria-checked", on ? "true" : "false");
+      });
     });
   }
 
@@ -654,10 +1315,13 @@
   }
 
   function setRadarProduct(id) {
-    if (!RADAR_PRODUCTS[id] || id === radarProductId) {
+    if (!productById(id, true) || id === radarProductId) {
       closeSettingsSheet();
       return;
     }
+    // A new choice clears any outage fallback from the previous one.
+    siteOutage = null;
+    siteRangeHintFor = null;
 
     // Tear down an active loop without restoring the old live layer — we rebuild
     // the live layer for the new product below.
@@ -684,15 +1348,15 @@
     if (radarLayer) map.removeLayer(radarLayer);
     radarLayer = next.addTo(map);
     displayedProductId = effectiveProductId();
-    if (p.mrmsLayer) primeMrmsLive();
+    if (tileSource(p)) primeLive();
+    syncSiteMarker();
+    syncSiteProductUI();
+    syncLegend();
+    syncSiteRangeHint();
     closeSettingsSheet();
-    // p is the effective product, so if the user picked an MRMS product while
-    // off-CONUS, name the actual fallback rather than silently naming MRMS.
-    setStatus(
-      mrmsFellBack()
-        ? "Outside MRMS coverage — showing " + p.label + "."
-        : p.label + " loaded."
-    );
+    // p is the effective product, so if the user picked something that fell
+    // back, name what's actually on screen rather than what they tapped.
+    setStatus(statusForCurrentProduct("loaded"));
   }
 
   function openSettingsSheet() {
@@ -724,16 +1388,18 @@
     if (!radarLayer || loopOn) return; // the loop drives its own frames
     lastRefreshAt = Date.now();
     const p = currentProduct();
-    if (p.mrmsLayer) {
+    const src = tileSource(p);
+    if (src) {
       // Re-resolve the newest canonical frame and repoint the layer at it.
       // Same URL scheme the loop uses, so what we fetch now is a loop cache
       // hit later. (No cache-buster — a given frame's tiles are immutable.)
-      ensureMrmsFrames(p.mrmsLayer).then(() => {
+      ensureFrames(src).then(() => {
         if (loopOn || currentProduct().id !== p.id) return;
-        // redraw() (not setUrl) — only options.t changes; see primeMrmsLive.
-        radarLayer.options.t = isoUTC(mrmsLiveFrame(p.mrmsLayer));
+        // redraw() (not setUrl) — only options.t changes; see primeLive.
+        const frame = liveFrame(src.key);
+        radarLayer.options.t = frame ? isoUTC(frame) : "";
         radarLayer.redraw();
-        evictMrmsCache();
+        evictTileCache();
       });
     } else {
       radarLayer.setUrl(radarTileUrl(p, true));
@@ -1118,10 +1784,11 @@
     if (radarLayer) map.removeLayer(radarLayer);
     setStatus("Loading radar loop… 0%");
 
-    // MRMS builds its frames from the canonical list, so it must load first;
-    // IEM derives frames from the clock and can build right away.
-    if (p.mrmsLayer) {
-      ensureMrmsFrames(p.mrmsLayer).then(() => {
+    // MRMS and single sites build their frames from the canonical list, so it
+    // must load first; IEM derives frames from the clock and can build now.
+    const src = tileSource(p);
+    if (src) {
+      ensureFrames(src).then(() => {
         if (loopOn) buildLoopLayers(p);
       });
     } else {
@@ -1130,7 +1797,7 @@
   }
 
   // Build one tile layer per frame and start the first (coarse) wave. Called
-  // synchronously for IEM; after the frame list resolves for MRMS.
+  // synchronously for IEM; after the frame list resolves otherwise.
   function buildLoopLayers(p) {
     const loopCfg = p.loop;
     buildLoopFrames();
@@ -1162,9 +1829,10 @@
     // all at once, so the browser spends its first connections on the coarse
     // frames and the loop can start before the finer waves finish.
     //
-    // MRMS frames come from our cached tile layer (so a frame the live view
-    // already fetched loads instantly from Cache Storage); IEM frames come
-    // from the time-enabled WMS.
+    // MRMS and single-site frames come from our cached tile layer (so a frame
+    // the live view already fetched loads instantly from Cache Storage); IEM
+    // frames come from the time-enabled WMS.
+    const src = tileSource(p);
     loopLayers = loopFrames.map((frame, i) => {
       const shared = {
         // Show the newest frame right away; keep the rest hidden until shown.
@@ -1177,10 +1845,10 @@
         // One attribution entry is plenty (Leaflet de-dupes identical text).
         attribution: i === 0 ? attr : undefined,
       };
-      const layer = p.mrmsLayer
+      const layer = src
         ? cachedTileLayer(
-            MRMS_TILE_URL,
-            Object.assign({ layer: p.mrmsLayer, t: isoUTC(frame) }, shared)
+            src.url,
+            Object.assign({}, src.vars, { t: isoUTC(frame) }, shared)
           )
         : L.tileLayer.wms(
             loopCfg.wmsUrl,
@@ -1249,6 +1917,9 @@
     loopStride = LOOP_STRIDES[w]; // frames now sit this many apart
     addWave(w + 1);
     if (w === 0) markLoopReady();
+    // The last wave landing means the full loop is cached — ~300 entries added
+    // in one burst, by far the biggest allocator, so sweep now.
+    if (w === loopWaves.length - 1) evictTileCache();
   }
 
   function onFrameLoaded(i) {
@@ -1319,12 +1990,9 @@
     } else if (radarLayer) {
       radarLayer.addTo(map);
       refreshRadar(false);
-      setStatus(
-        mrmsFellBack()
-          ? "Outside MRMS coverage — showing live " + currentProduct().label + "."
-          : "Showing live " + currentProduct().label + "."
-      );
+      setStatus(statusForCurrentProduct("live"));
     }
+    syncLegend();
   }
 
   // Build 24 frame timestamps at 5-minute spacing (the native composite
@@ -1332,8 +2000,9 @@
   // grid the composites are built on).
   function buildLoopFrames() {
     const p = currentProduct();
-    if (p.mrmsLayer) {
-      buildMrmsLoopFrames(p.mrmsLayer);
+    const src = tileSource(p);
+    if (src) {
+      buildCanonicalLoopFrames(src.key);
       return;
     }
     const now = Date.now();
@@ -1345,22 +2014,25 @@
     }
   }
 
-  // MRMS loop frames: 24 slots at 5-minute spacing across the last 2h, each
-  // snapped to the nearest canonical frame for this layer (deduped). The
-  // newest slot snaps to the very frame the live view is showing, so tapping
-  // Loop reuses the tiles already in Cache Storage instead of re-downloading.
-  function buildMrmsLoopFrames(layerKey) {
+  // Loop frames for a canonical (MRMS or single-site) source: 24 slots at
+  // 5-minute spacing across the last 2h, each snapped to the nearest real frame
+  // for this source and deduped. The newest slot snaps to the very frame the
+  // live view is showing, so tapping Loop reuses the tiles already in Cache
+  // Storage instead of re-downloading. A site's ~6-minute volume scans mean
+  // several slots collapse onto one frame — the dedupe handles that, leaving
+  // ~20 frames rather than 24.
+  function buildCanonicalLoopFrames(key) {
     const step = LOOP_STEP_MIN * 60 * 1000;
     const target = Date.now() - LOOP_LAG_MIN * 60 * 1000;
-    const newest = (snapMrmsFrame(layerKey, target) || new Date(target)).getTime();
+    const newest = (snapFrame(key, target) || new Date(target)).getTime();
     const frames = [];
     const seen = new Set();
     for (let i = LOOP_FRAME_COUNT - 1; i >= 0; i--) {
-      const snapped = snapMrmsFrame(layerKey, newest - i * step);
+      const snapped = snapFrame(key, newest - i * step);
       if (!snapped) continue;
-      const key = snapped.getTime();
-      if (seen.has(key)) continue; // collapse slots that snap to one frame
-      seen.add(key);
+      const at = snapped.getTime();
+      if (seen.has(at)) continue; // collapse slots that snap to one frame
+      seen.add(at);
       frames.push(snapped);
     }
     frames.sort((a, b) => a - b);
@@ -1781,10 +2453,40 @@
     els.shareBtn.addEventListener("click", shareView);
     els.settingsBtn.addEventListener("click", toggleSettingsSheet);
     els.settingsClose.addEventListener("click", closeSettingsSheet);
-    els.radarProductOptions.addEventListener("click", (e) => {
+    // Same delegation for the static mosaic list and the dynamic site list.
+    const onProductClick = (e) => {
       const btn = e.target.closest("[data-product]");
-      if (!btn || !els.radarProductOptions.contains(btn)) return;
+      if (!btn) return;
       setRadarProduct(btn.getAttribute("data-product"));
+    };
+    els.radarProductOptions.addEventListener("click", onProductClick);
+    if (els.siteProductOptions) {
+      els.siteProductOptions.addEventListener("click", onProductClick);
+    }
+    if (els.sitePickBtn) els.sitePickBtn.addEventListener("click", enterSitePicking);
+    if (els.sitePickCancel) {
+      els.sitePickCancel.addEventListener("click", () => {
+        exitSitePicking();
+        siteRangeHintFor = null;
+        setStatus(statusForCurrentProduct());
+      });
+    }
+    if (els.sitePickAction) {
+      els.sitePickAction.addEventListener("click", () => {
+        const site = els.sitePickAction.getAttribute("data-site");
+        if (site) onSiteMarkerTap(site);
+      });
+    }
+    if (els.legendImg) {
+      els.legendImg.addEventListener("error", () => {
+        if (els.legendRow) els.legendRow.classList.add("hidden");
+      });
+    }
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && sitePicking) {
+        exitSitePicking();
+        setStatus(statusForCurrentProduct());
+      }
     });
     els.zipForm.addEventListener("submit", (e) => {
       e.preventDefault();

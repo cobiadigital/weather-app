@@ -3,9 +3,11 @@
  *
  * Static assets (the front-end in /public) are served automatically by the
  * platform. This Worker handles the API routes:
- *   - /api/nws/*  — proxy the National Weather Service API (api.weather.gov)
- *   - /api/nhc/*  — National Hurricane Center data for the /tropics page
- *   - /api/mrms/* — NCEP's MRMS radar WMS re-served as {z}/{x}/{y} tiles
+ *   - /api/nws/*    — proxy the National Weather Service API (api.weather.gov)
+ *   - /api/nhc/*    — National Hurricane Center data for the /tropics page
+ *   - /api/mrms/*   — NCEP's MRMS mosaic WMS re-served as {z}/{x}/{y} tiles
+ *   - /api/site/*   — the same, for an individual radar site (NEXRAD / TDWR)
+ *   - /api/legend/* — GeoServer legend images for the single-site products
  *
  * Why proxy instead of calling these straight from the browser:
  *   - The NWS asks every client to send a descriptive User-Agent. Browsers
@@ -25,20 +27,61 @@ const NWS_BASE = "https://api.weather.gov";
 //  - NOAA tropical MapServer: official cone + coastal wind watches/warnings as
 //    queryable GeoJSON (no KMZ). Arrival / probabilistic-wind / inundation
 //    products are loaded client-side via MapServer /export (see tropics.js).
-// NCEP GeoServer — MRMS CONUS radar mosaics (quality-controlled, 1km, ~2-min
-// updates). Unlike IEM's tile cache, NCEP only speaks WMS GetMap (render an
-// arbitrary bbox), so the /api/mrms/* routes below turn each layer into the
-// {z}/{x}/{y} tile scheme the map already uses, with the frame time baked into
-// the URL (?t=) so live tiles and loop tiles share cache keys. See app.js.
-// Keys are the path segment app.js requests (/api/mrms/<key>/...); values are
-// the real GeoServer layer names, all in the "conus" workspace.
-const MRMS_WMS = "https://opengeo.ncep.noaa.gov/geoserver/conus/ows";
-const MRMS_LAYERS = {
+// NCEP GeoServer. It publishes both the CONUS MRMS mosaics (the "conus"
+// workspace) and every individual radar site (one workspace per site, e.g.
+// "kmob"). Unlike IEM's tile cache, NCEP only speaks WMS GetMap (render an
+// arbitrary bbox), so the /api/mrms/* and /api/site/* routes below turn each
+// layer into the {z}/{x}/{y} tile scheme the map already uses, with the frame
+// time baked into the URL (?t=) so live tiles and loop tiles share cache keys.
+// See app.js.
+const NCEP_GEOSERVER = "https://opengeo.ncep.noaa.gov/geoserver/";
+const MRMS_WMS = NCEP_GEOSERVER + "conus/ows";
+const siteWms = (site) => NCEP_GEOSERVER + site + "/ows";
+
+// MRMS mosaics. Keys are the path segment app.js requests
+// (/api/mrms/<key>/...); values are the real GeoServer layer names.
+// Object.create(null) so inherited names ("constructor") can't masquerade as
+// layers when we do the `MRMS_LAYERS[key]` allowlist check.
+const MRMS_LAYERS = Object.assign(Object.create(null), {
   base: "conus_bref_qcd", // Base Reflectivity
   composite: "conus_cref_qcd", // Composite Reflectivity
   ptype: "conus_pcpn_typ", // Precipitation Type
   eet: "conus_neet_v18", // Enhanced Echo Tops
-};
+});
+
+// Individual radar sites (/api/site/<site>/<product>/...). The site id is the
+// GeoServer workspace AND the layer-name prefix — layers are `<site>_<product>`.
+// SITE_RE is the security boundary: 4 chars from [kpt][a-z0-9]{3} can't contain
+// a slash, dot, colon or percent, so a site id provably cannot escape its path
+// segment in siteWms(). The product is a closed allowlist. Between them, only
+// validated values ever reach the upstream URL.
+const SITE_RE = /^[kpt][a-z0-9]{3}$/;
+const SITE_PRODUCTS = Object.assign(Object.create(null), {
+  // WSR-88D (NEXRAD) — 156 sites
+  sr_bref: 1, // Super-Res Base Reflectivity
+  sr_bvel: 1, // Super-Res Base Radial Velocity
+  bdhc: 1, // Dual-Pol Hydrometeor Classification
+  bdsa: 1, // Dual-Pol Storm Total Precipitation
+  boha: 1, // Surface Rainfall, 1-Hour Running Total
+  // TDWR — 45 sites
+  bref1: 1, // Base Reflectivity
+  brefl: 1, // Long Range Base Reflectivity
+  bvel: 1, // Base Radial Velocity
+});
+// A product's legend image is byte-identical across every site (it depends only
+// on the style), so /api/legend/<product>.png renders it from one reference
+// site — 8 cache entries instead of 201 x 8.
+const LEGEND_REF = Object.assign(Object.create(null), {
+  sr_bref: "ktlx",
+  sr_bvel: "ktlx",
+  bdhc: "ktlx",
+  bdsa: "ktlx",
+  boha: "ktlx",
+  bref1: "tatl",
+  brefl: "tatl",
+  bvel: "tatl",
+});
+
 // Half-width of the web-mercator (EPSG:3857) world square, in metres.
 const WEB_MERCATOR_MAX = 20037508.342789244;
 
@@ -71,6 +114,14 @@ export default {
 
     if (pathname.startsWith("/api/mrms/")) {
       return handleMRMS(request, url);
+    }
+
+    if (pathname.startsWith("/api/site/")) {
+      return handleSite(request, url);
+    }
+
+    if (pathname.startsWith("/api/legend/")) {
+      return handleLegend(request, url);
     }
 
     // Anything else that reaches the Worker (i.e. not a static asset) is a 404.
@@ -437,11 +488,12 @@ async function handleMRMS(request, url) {
   const sub = url.pathname.slice("/api/mrms/".length);
   const framesMatch = sub.match(/^([a-z]+)\/frames$/);
   if (framesMatch && MRMS_LAYERS[framesMatch[1]]) {
-    return mrmsFrames(MRMS_LAYERS[framesMatch[1]]);
+    return wmsFrames(MRMS_WMS, MRMS_LAYERS[framesMatch[1]]);
   }
   const tileMatch = sub.match(/^([a-z]+)\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/);
   if (tileMatch && MRMS_LAYERS[tileMatch[1]]) {
-    return mrmsTile(
+    return wmsTile(
+      MRMS_WMS,
       MRMS_LAYERS[tileMatch[1]],
       parseInt(tileMatch[2], 10),
       parseInt(tileMatch[3], 10),
@@ -452,16 +504,101 @@ async function handleMRMS(request, url) {
   return json({ error: "Not found" }, 404);
 }
 
-// The layer's advertised TIME dimension is a rolling ~2h list of ~2-minute
-// frames. We read it from GetCapabilities and hand back a sorted array.
-async function mrmsFrames(layerName) {
+// ---------------------------------------------------------------------------
+// Single radar site (/api/site/*) — one NEXRAD/TDWR radar instead of a mosaic.
+// ---------------------------------------------------------------------------
+//
+//   GET /api/site/{site}/{product}/frames
+//   GET /api/site/{site}/{product}/{z}/{x}/{y}.png?t=<ISO8601>
+//
+// Same shape and semantics as /api/mrms/*, but the GeoServer workspace is the
+// site id and the layer is `<site>_<product>`. Site products also carry a TIME
+// dimension (~20 frames over ~2h at the radar's ~6-minute volume-scan cadence),
+// so the client's frame-snapping, tile cache and 2h loop all work unchanged.
+async function handleSite(request, url) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const sub = url.pathname.slice("/api/site/".length);
+
+  const framesMatch = sub.match(/^([a-z0-9]{4})\/([a-z0-9_]{4,7})\/frames$/);
+  if (framesMatch && SITE_RE.test(framesMatch[1]) && SITE_PRODUCTS[framesMatch[2]]) {
+    const site = framesMatch[1];
+    return wmsFrames(siteWms(site), site + "_" + framesMatch[2], 120, 60);
+  }
+
+  const tileMatch = sub.match(
+    /^([a-z0-9]{4})\/([a-z0-9_]{4,7})\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/
+  );
+  if (tileMatch && SITE_RE.test(tileMatch[1]) && SITE_PRODUCTS[tileMatch[2]]) {
+    const site = tileMatch[1];
+    return wmsTile(
+      siteWms(site),
+      site + "_" + tileMatch[2],
+      parseInt(tileMatch[3], 10),
+      parseInt(tileMatch[4], 10),
+      parseInt(tileMatch[5], 10),
+      url.searchParams.get("t")
+    );
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+// GeoServer's rendered legend for one site product. Keyed by product only —
+// the image is identical across sites — so all 201 sites share 8 cache entries.
+async function handleLegend(request, url) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const m = url.pathname.slice("/api/legend/".length).match(/^([a-z0-9_]{4,7})\.png$/);
+  if (!m || !SITE_PRODUCTS[m[1]]) return json({ error: "Not found" }, 404);
+  const product = m[1];
+  const ref = LEGEND_REF[product];
+
+  const params = new URLSearchParams({
+    service: "WMS",
+    version: "1.3.0",
+    request: "GetLegendGraphic",
+    format: "image/png",
+    width: "500",
+    height: "30",
+    layer: ref + "_" + product,
+    // Light text on the app's dark panel. GeoServer vendor option; harmless if
+    // this build ignores it (the client also CSS-inverts as a fallback).
+    LEGEND_OPTIONS: "fontColor:0xffffff;fontAntiAliasing:true",
+  });
+
+  let upstream;
+  try {
+    upstream = await fetch(siteWms(ref) + "?" + params.toString(), {
+      headers: { "User-Agent": USER_AGENT },
+      cf: { cacheTtl: 86400, cacheEverything: true },
+    });
+  } catch (_) {
+    return new Response("Upstream error", { status: 502 });
+  }
+  if (!upstream.ok) return new Response("Upstream error", { status: 502 });
+
+  const body = await upstream.arrayBuffer();
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") || "image/png");
+  headers.set("access-control-allow-origin", "*");
+  // A product's colour ramp doesn't change; cache it for a week.
+  headers.set("cache-control", "public, max-age=604800, immutable");
+  return new Response(body, { status: 200, headers });
+}
+
+// The layer's advertised TIME dimension is a rolling ~2h list of frames. We
+// read it from the workspace's GetCapabilities and hand back a sorted array.
+async function wmsFrames(wmsBase, layerName, cacheTtl = 60, browserTtl = 30) {
   let upstream;
   try {
     upstream = await fetch(
-      MRMS_WMS + "?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities",
+      wmsBase + "?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities",
       {
         headers: { "User-Agent": USER_AGENT },
-        cf: { cacheTtl: 60, cacheEverything: true },
+        cf: { cacheTtl, cacheEverything: true },
       }
     );
   } catch (_) {
@@ -475,13 +612,14 @@ async function mrmsFrames(layerName) {
   } catch (_) {
     return json({ frames: [] }, 200, 30);
   }
-  return json({ frames: parseTimeDimension(xml, layerName) }, 200, 30);
+  return json({ frames: parseTimeDimension(xml, layerName) }, 200, browserTtl);
 }
 
 // Pull the comma-separated instants out of the named layer's
 // <Layer>…<Name>layerName</Name>…<Dimension name="time">…</Dimension>…</Layer>
-// block (the workspace-wide GetCapabilities lists all 4 layers, so we have to
-// find the right one) and return the well-formed ISO ones, oldest first.
+// block (a workspace's GetCapabilities lists every layer it holds — 4 for the
+// conus mosaics, 3-5 for a radar site — so we have to find the right one) and
+// return the well-formed ISO ones, oldest first.
 function parseTimeDimension(xml, layerName) {
   const layerBlocks = xml.match(/<Layer queryable="1"[^>]*>[\s\S]*?<\/Layer>/g) || [];
   const block = layerBlocks.find((b) => b.includes("<Name>" + layerName + "</Name>"));
@@ -496,7 +634,7 @@ function parseTimeDimension(xml, layerName) {
   return times;
 }
 
-async function mrmsTile(layerName, z, x, y, rawTime) {
+async function wmsTile(wmsBase, layerName, z, x, y, rawTime) {
   // Bounds-check the tile coords (guards the bbox math and the upstream URL).
   const dim = Math.pow(2, z);
   if (z < 0 || z > 20 || x < 0 || y < 0 || x >= dim || y >= dim) {
@@ -525,9 +663,9 @@ async function mrmsTile(layerName, z, x, y, rawTime) {
 
   let upstream;
   try {
-    upstream = await fetch(MRMS_WMS + "?" + params.toString(), {
+    upstream = await fetch(wmsBase + "?" + params.toString(), {
       headers: { "User-Agent": USER_AGENT },
-      // (z,x,y,t) names one immutable image, so cache it hard at the edge.
+      // (layer,z,x,y,t) names one immutable image, so cache it hard at the edge.
       cf: { cacheTtl: 3600, cacheEverything: true },
     });
   } catch (_) {

@@ -23,21 +23,23 @@ Assets**. All data is public and comes from NOAA / the NWS.
     ("spaghetti") tracks and the NHC official forecast. Reuses `styles.css` +
     the same Leaflet/CARTO setup; page-specific CSS is inline in `tropics.html`.
 - **`src/index.js`** — the Worker. It handles `/api/nws/*` (proxying
-  `https://api.weather.gov`), `/api/nhc/*` (the National Hurricane Center), and
-  `/api/mrms/*` (re-tiling NCEP's MRMS radar WMS — see below), so it can set the
-  `User-Agent` those services require (browsers can't set that header), re-tile
-  where needed, and cache responses at the edge.
+  `https://api.weather.gov`), `/api/nhc/*` (the National Hurricane Center),
+  `/api/mrms/*` + `/api/site/*` (re-tiling NCEP's MRMS mosaic and single-radar
+  WMS — see below) and `/api/legend/*`, so it can set the `User-Agent` those
+  services require (browsers can't set that header), re-tile where needed, and
+  cache responses at the edge.
 - **`wrangler.toml`** — binds `public/` as static assets and points `main` at
   the Worker.
 
 ## Data sources
 
-The settings sheet has 5 selectable radar products: **Base Reflectivity
+The settings sheet has 5 selectable **mosaic** products — **Base Reflectivity
 (MRMS)** (the default), **Base Reflectivity (NEXRAD)**, **Composite
-Reflectivity**, **Precipitation Type**, and **Echo Tops**. The 4 MRMS-backed
-ones share the Worker-proxied, cached pipeline below (the "Radar (MRMS,
-cached)" bullet); NEXRAD base reflectivity is IEM-sourced with its own
-time-enabled WMS loop (the next bullet).
+Reflectivity**, **Precipitation Type**, **Echo Tops** — plus a **single radar
+site** picker (any of 201 individual NEXRAD/TDWR radars, see its own bullet
+below). The 4 MRMS-backed mosaics and every site product share the
+Worker-proxied, cached pipeline (the "Radar (MRMS, cached)" bullet); NEXRAD
+base reflectivity is IEM-sourced with its own time-enabled WMS loop.
 
 - **Radar tiles (IEM NEXRAD, live)** — Iowa Environmental Mesonet NEXRAD N0Q
   composite (the "Base Reflectivity (NEXRAD)" product):
@@ -91,11 +93,24 @@ time-enabled WMS loop (the next bullet).
   reloads. The live view pins to the newest canonical frame for its product
   (re-pinned on each 5-min refresh, the same cadence at which the cache
   accumulates frames), and the loop's newest slot snaps to that exact frame —
-  guaranteeing the current view is a cache hit. Entries older than the 2 h
-  window are evicted (by frame time, regardless of product). Everything
-  degrades to plain network tiles where Cache Storage is unavailable (e.g.
-  private mode). Frame lists are memoized per product (`mrmsFramesByLayer`,
-  keyed by `mrmsLayer`), since each product updates on its own schedule.
+  guaranteeing the current view is a cache hit. Everything degrades to plain
+  network tiles where Cache Storage is unavailable (e.g. private mode). Frame
+  lists are memoized per source (`framesByKey`, keyed by `tileSource().key`),
+  since each product — and each radar — updates on its own schedule.
+
+  **Cache budget (`evictTileCache`).** The 2 h window alone doesn't bound
+  *size*: one loop is ~288 tiles (~8 MB), and with 201 sites × 8 products
+  sweeping a few radars would pile up hundreds of MB inside the window —
+  enough for iOS Safari to evict the whole bucket. So eviction is two passes:
+  age out anything past `MRMS_CACHE_WINDOW_MS` (**including entries whose `?t=`
+  is missing or unparseable** — those used to linger forever), then cap the
+  total at `TILE_CACHE_MAX_ENTRIES` (800 ≈ 23 MB), trimming to
+  `TILE_CACHE_TRIM_TO` (600, hysteresis so a sweep isn't re-triggered by the
+  next tile). Overflow is shed **from products the user isn't looking at
+  first, oldest frame first**, so the active loop — the whole point of the
+  cache — survives. `navigator.storage.estimate()` is consulted as an advisory
+  backstop that only ever tightens the target. Sweeps run on prime, refresh,
+  product switch, and after the final loop wave lands (the biggest allocator).
 
   All 4 MRMS layers cover the **lower 48 only**. When the map is centered
   outside CONUS (Alaska, Hawaii, Puerto Rico, …), each MRMS-backed product
@@ -108,6 +123,51 @@ time-enabled WMS loop (the next bullet).
   `effectiveProductId()` (what's shown; applies the fallback). The live layer
   is rebuilt on every `moveend` that crosses the CONUS box; the fallback only
   applies to MRMS-backed products, not to an explicitly-chosen IEM product.
+- **Radar (single site)** — the same NCEP GeoServer also publishes **201
+  individual radars**, one workspace per site (`kmob`, `ktlx`, `tatl`, …), each
+  with its own time dimension (~20 frames over ~2 h at the radar's ~6-minute
+  volume-scan cadence). Two radar types, with different products:
+  - **156 WSR-88D (NEXRAD)** — `sr_bref` (super-res base reflectivity),
+    `sr_bvel` (base radial velocity — the app's only view of storm
+    **rotation**), `bdhc` (dual-pol hydrometeor classification), `bdsa` (storm
+    total precip), `boha` (1-hour accumulation).
+  - **45 TDWR** — `bref1`, `brefl` (long range), `bvel`.
+
+  Worker routes mirror the MRMS ones: `GET /api/site/{site}/{product}/frames`
+  and `GET /api/site/{site}/{product}/{z}/{x}/{y}.png?t=<iso>`. The site id is
+  both the GeoServer workspace and the layer prefix (`<site>_<product>`).
+  **`SITE_RE = /^[kpt][a-z0-9]{3}$/` is the security boundary** — 4 chars from
+  that class can't contain a slash, dot, colon or percent, so a site id
+  provably cannot escape its path segment; the product is a closed allowlist
+  (`SITE_PRODUCTS`). Only validated values ever reach the upstream URL.
+  `GET /api/legend/{product}.png` proxies GeoServer's `GetLegendGraphic`;
+  the image depends only on the product's style, so it's rendered from one
+  reference site (`LEGEND_REF`) — 8 cache entries rather than 201 × 8.
+
+  Client-side, a site selection is encoded as a **single composite product id**,
+  `"site:kmob:sr_bref"`, stored in the same `radar.product` key. That keeps the
+  blast radius tiny: every existing invariant is a string comparison, and
+  `effectiveProductId()` needs no change (a composite id misses the
+  `RADAR_PRODUCTS` lookup and is returned verbatim, so site products correctly
+  never off-CONUS-fallback). `productById()` resolves an id to either a
+  `RADAR_PRODUCTS` entry or a memoized synthetic one from `siteProduct()`, and
+  **`tileSource(p)` is the single discriminator** every layer/loop/refresh path
+  uses to pick between the MRMS route, the site route, and plain IEM tiles.
+  `public/radar-sites.json` (~7.7 KB, `{site: [lat, lon, name, type]}`,
+  generated from NCEP's workspace list ∩ `api.weather.gov/radar/stations`) is
+  fetched lazily — a cold start on a mosaic never requests it.
+
+  Sites are chosen by **tapping a marker on the map** (201 entries is far too
+  many for a list): `enterSitePicking()` renders viewport-culled markers capped
+  at `SITE_MARKER_MAX`, using 4 shared `L.divIcon`s so 200 markers aren't 200
+  allocations. The selected radar keeps a marker plus a dashed **coverage ring**
+  (`SITE_RANGE_KM`), which is what makes "why is it blank over there" obvious.
+  Panning outside that range shows a prompt offering the nearest radar but
+  **never switches automatically** — the user picked this one. The one
+  exception is an **outage**: if a site's frame list comes back empty the radar
+  isn't reporting (indistinguishable on screen from clear skies), so
+  `siteOutage` temporarily forces the mosaic via `effectiveProductId()` while
+  leaving the saved choice alone, so the site returns by itself.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES

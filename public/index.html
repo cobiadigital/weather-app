@@ -186,6 +186,19 @@
         <span id="loopTime" class="slider-val loop-time">--:--</span>
       </div>
 
+      <!-- Single-site radar: picking prompt / out-of-range prompt (hidden until
+           the user enters site picking or pans outside the radar's range). -->
+      <div id="sitePickBar" class="control-row site-pick-row hidden">
+        <span id="sitePickMsg" class="site-pick-msg">Tap a radar site on the map</span>
+        <button id="sitePickAction" class="icon-btn site-pick-action hidden" type="button"></button>
+        <button id="sitePickCancel" class="icon-btn site-pick-action" type="button">Cancel</button>
+      </div>
+
+      <!-- Colour scale for the current single-site product (hidden for mosaics) -->
+      <div id="legendRow" class="control-row legend-row hidden">
+        <img id="legendImg" alt="" />
+      </div>
+
       <div id="status" class="status">Loading radar…</div>
     </footer>
 
@@ -269,6 +282,26 @@
           <span class="settings-check" aria-hidden="true">✓</span>
         </button>
       </div>
+
+      <!-- Single radar site: pick one on the map, then choose its products.
+           The product list is rendered by app.js because it varies by radar
+           type (5 products for WSR-88D, 3 for TDWR). -->
+      <button id="sitePickBtn" class="settings-link" type="button">
+        <span class="settings-option-text">
+          <span class="settings-option-title">Single radar site</span>
+          <span class="settings-option-desc" id="sitePickDesc">
+            Tap one NEXRAD or TDWR radar on the map
+          </span>
+        </span>
+        <span class="settings-link-chevron" aria-hidden="true">›</span>
+      </button>
+      <div
+        id="siteProductOptions"
+        class="settings-options site-options hidden"
+        role="radiogroup"
+        aria-label="Single-site radar product"
+      ></div>
+
       <a class="settings-link" href="/tropics">
         <span class="settings-option-text">
           <span class="settings-option-title">Tropics</span>

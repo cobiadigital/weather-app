@@ -26,6 +26,11 @@ All data is public and comes from **NOAA / the National Weather Service**:
   (MRMS or NEXRAD), composite reflectivity, precipitation type, and echo tops
   (composite/precip-type/echo-tops are all MRMS-backed, with the same cached
   live view + 2-hour loop as base reflectivity)
+- **Single radar site** — tap any of 201 individual NEXRAD/TDWR radars on the
+  map for a much sharper local view, plus products the national mosaic can't
+  give you: **base velocity** (storm rotation), dual-pol hydrometeor type, and
+  rainfall accumulation. Each gets the same cached live view + 2-hour loop, a
+  colour-scale legend, and a coverage ring showing the radar's range
 - **My location** button (uses your device GPS) and remembers your last spot.
   Once a location is set, the location controls collapse to a small pin in the
   top bar (tap it to re-center or change location)
@@ -55,6 +60,16 @@ All data is public and comes from **NOAA / the National Weather Service**:
   you've already viewed replay in the loop with no re-download. MRMS is
   CONUS-only, so outside the lower 48 each product falls back to the IEM
   product it replaced.
+- **Radar (single site)** — the same NCEP GeoServer publishes **201 individual
+  radars** (156 WSR-88D + 45 TDWR), one workspace each, all time-enabled. The
+  Worker re-tiles them at `/api/site/{site}/{product}/…` exactly like the
+  mosaics, so they inherit the frame snapping, on-device cache and 2-hour loop.
+  WSR-88D sites offer super-res reflectivity, base velocity, hydrometeor type,
+  storm-total precip and 1-hour accumulation; TDWR sites offer reflectivity
+  (short and long range) and velocity. `/api/legend/{product}.png` proxies
+  GeoServer's legend image (identical across sites, so it's cached per
+  product). `public/radar-sites.json` (~7.7 KB) maps each site to its
+  coordinates, name and type, and is fetched only when a site is used.
 - **Radar (IEM products)** — the NEXRAD N0Q base-reflectivity composite from
   the [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/), a
   selectable alternative to MRMS base reflectivity; its 2-hour loop uses IEM's
@@ -77,7 +92,7 @@ All data is public and comes from **NOAA / the National Weather Service**:
 ```
 wrangler.toml      Worker + static-assets config
 src/index.js       Worker: /api/nws/* (NWS), /api/nhc/* (hurricanes),
-                   /api/mrms/* (MRMS radar tiles)
+                   /api/mrms/* + /api/site/* (radar tiles), /api/legend/*
 public/            Static front-end (served automatically at the edge)
   index.html       main radar page
   styles.css
@@ -85,6 +100,7 @@ public/            Static front-end (served automatically at the edge)
   tropics.html     /tropics page (cyclone tracks)
   tropics.js
   zip3.json        3-digit ZIP → lat/lon table
+  radar-sites.json radar site → lat/lon, name, type
 ```
 
 Static files in `public/` are served directly by Cloudflare's asset hosting.
