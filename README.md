@@ -117,9 +117,30 @@ Since Wrangler isn't required to deploy:
 3. Cloudflare reads `wrangler.toml` automatically. Leave the build command
    empty (there's no build step) and the deploy command as the default
    (`npx wrangler deploy`).
-4. Save & deploy. Every commit to the connected branch redeploys.
+4. Save & deploy. Every commit to the production branch redeploys.
 
 Your app will be available at `https://weather-app.<your-subdomain>.workers.dev`.
+
+### Branch previews
+
+`wrangler.toml` sets `preview_urls = true`, so with **non-production branch
+builds** enabled (Settings → Build → Branch control) every pull request gets a
+shareable URL:
+
+```
+https://<branch-name>-weather-app.<your-subdomain>.workers.dev   stable per branch
+https://<version-id>-weather-app.<your-subdomain>.workers.dev    pinned to one build
+```
+
+`<branch-name>` is sanitised for DNS — `/` becomes `-`, so
+`claude/my-feature` → `claude-my-feature-weather-app.…`. The Cloudflare GitHub
+app posts both links as a pull-request comment.
+
+> **Set the non-production deploy command to `npx wrangler versions upload`.**
+> The default `npx wrangler deploy` publishes to **production** from whatever
+> branch it builds — so with non-production builds enabled, pushing any branch
+> would overwrite the live site. `versions upload` uploads a version (giving it
+> a preview URL) without promoting it to production.
 
 ## Local development (optional)
 

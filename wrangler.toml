@@ -2,9 +2,22 @@ name = "weather-app"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
 
-# Serve the static front-end (public/) directly from the edge.
-# Requests that don't match a static asset fall through to the Worker
-# in src/index.js (used for the /api/nws/* National Weather Service proxy).
+# Give every uploaded version a preview URL, so a branch can be opened and
+# tested before it's merged. With non-production branch builds enabled in
+# Workers Builds, each pull request gets:
+#   <branch-name>-weather-app.cobiadigital.workers.dev   (stable per branch)
+#   <version-id>-weather-app.cobiadigital.workers.dev    (pinned to one build)
+# Both are posted to the PR by the Cloudflare GitHub app.
+# NOTE: this only keeps a branch *off* production if the Workers Builds
+# non-production deploy command is `npx wrangler versions upload`. The default
+# `npx wrangler deploy` publishes to production from whatever branch it builds.
+# Must stay above [assets] — TOML puts bare keys after a table header inside
+# that table.
+preview_urls = true
+
+# Serve the static front-end (public/) directly from the edge. Requests that
+# don't match a static asset fall through to the Worker in src/index.js, which
+# handles /api/nws/*, /api/nhc/*, /api/mrms/*, /api/site/* and /api/legend/*.
 [assets]
 directory = "./public"
 binding = "ASSETS"

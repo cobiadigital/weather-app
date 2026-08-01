@@ -188,10 +188,12 @@
 
       <!-- Single-site radar: picking prompt / out-of-range prompt (hidden until
            the user enters site picking or pans outside the radar's range). -->
-      <div id="sitePickBar" class="control-row site-pick-row hidden">
+      <div id="sitePickBar" class="site-pick-row hidden">
         <span id="sitePickMsg" class="site-pick-msg">Tap a radar site on the map</span>
-        <button id="sitePickAction" class="icon-btn site-pick-action hidden" type="button"></button>
-        <button id="sitePickCancel" class="icon-btn site-pick-action" type="button">Cancel</button>
+        <div class="site-pick-actions">
+          <button id="sitePickAction" class="btn site-pick-btn hidden" type="button"></button>
+          <button id="sitePickCancel" class="btn site-pick-btn" type="button">Cancel</button>
+        </div>
       </div>
 
       <!-- Colour scale for the current single-site product (hidden for mosaics) -->
