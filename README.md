@@ -141,15 +141,9 @@ which Workers Builds runs automatically for non-production branches — the
 **non-production deploy command defaults to `npx wrangler versions upload`**
 (the `npx wrangler deploy` default applies to the *production* branch only).
 
-> **If a branch alias 404s and pushing a branch updates the live site**, the
-> branch is being built through the production path. Check two settings under
-> Settings → Build:
->
-> 1. **Branch control** — the production branch must be `main`, not a pattern
->    that also matches feature branches.
-> 2. **Non-production deploy command** — must be `npx wrangler versions upload`.
->    If it was overridden to `npx wrangler deploy`, every branch build publishes
->    to production and no alias is created.
+The alias is created **when the pull request is opened**, so a branch with no
+open PR (or one already merged) won't have one and its URL will 404. Open the
+PR first, then use the branch link.
 
 ## Local development (optional)
 

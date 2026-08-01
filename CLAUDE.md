@@ -285,13 +285,17 @@ Branch aliases exist only when the build runs
 non-production branches by default (`npx wrangler deploy` is the *production*
 branch default, and it publishes live).
 
-⚠️ **Don't assume a branch is sandboxed.** If the branch alias 404s and pushing
-the branch changes bendar.app, the branch is being built through the production
-path. Check Settings → Build: (1) Branch control's production branch is `main`
-and not a pattern matching feature branches, and (2) the non-production deploy
-command is still `npx wrangler versions upload`. Verify by timing a push
-against the Worker's `modified_on` — if it moves within a minute or two of a
-*branch* push, that branch is deploying live.
+Aliases are created **when a pull request exists** for the branch, so pushing
+to a branch with no open PR (or one already merged) won't mint one — expect the
+branch URL to 404 until the PR is opened.
+
+Two traps when checking whether a branch is live:
+
+- The Worker's `modified_on` moves for a *version upload* too, not just a
+  production deploy, so a fresh timestamp after a branch push proves nothing.
+- If the branch has been merged, production legitimately serves that code —
+  confirm against `git merge-base --is-ancestor <sha> origin/main` before
+  concluding a branch deployed itself.
 
 ## Local dev (optional)
 
