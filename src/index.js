@@ -25,14 +25,20 @@ const NWS_BASE = "https://api.weather.gov";
 //  - NOAA tropical MapServer: official cone + coastal wind watches/warnings as
 //    queryable GeoJSON (no KMZ). Arrival / probabilistic-wind / inundation
 //    products are loaded client-side via MapServer /export (see tropics.js).
-// NCEP GeoServer — MRMS "Quality Controlled 1km CONUS Base Reflectivity"
-// (conus_bref_qcd). Unlike IEM's tile cache, NCEP only speaks WMS GetMap
-// (render an arbitrary bbox), so the /api/mrms/* routes below turn it into the
+// NCEP GeoServer — MRMS CONUS radar mosaics (quality-controlled, 1km, ~2-min
+// updates). Unlike IEM's tile cache, NCEP only speaks WMS GetMap (render an
+// arbitrary bbox), so the /api/mrms/* routes below turn each layer into the
 // {z}/{x}/{y} tile scheme the map already uses, with the frame time baked into
 // the URL (?t=) so live tiles and loop tiles share cache keys. See app.js.
-const MRMS_WMS =
-  "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows";
-const MRMS_LAYER = "conus_bref_qcd";
+// Keys are the path segment app.js requests (/api/mrms/<key>/...); values are
+// the real GeoServer layer names, all in the "conus" workspace.
+const MRMS_WMS = "https://opengeo.ncep.noaa.gov/geoserver/conus/ows";
+const MRMS_LAYERS = {
+  base: "conus_bref_qcd", // Base Reflectivity
+  composite: "conus_cref_qcd", // Composite Reflectivity
+  ptype: "conus_pcpn_typ", // Precipitation Type
+  eet: "conus_neet_v18", // Enhanced Echo Tops
+};
 // Half-width of the web-mercator (EPSG:3857) world square, in metres.
 const WEB_MERCATOR_MAX = 20037508.342789244;
 
@@ -414,25 +420,32 @@ function decodeCoord(s) {
 // MRMS radar (/api/mrms/*) — NCEP GeoServer WMS re-served as XYZ tiles.
 // ---------------------------------------------------------------------------
 //
-//   GET /api/mrms/frames        -> { frames: [ISO8601, …] } newest last, the
-//                                  canonical times both the live view and the
-//                                  loop snap to (so their tile URLs match).
-//   GET /api/mrms/{z}/{x}/{y}.png?t=<ISO8601>
-//                               -> one 256px tile, rendered by NCEP for that
-//                                  tile's bbox at frame <t>. Immutable per
-//                                  (z,x,y,t), so it's cached hard at the edge.
+//   GET /api/mrms/{product}/frames  -> { frames: [ISO8601, …] } newest last,
+//                                      the canonical times both the live view
+//                                      and the loop snap to (so their tile
+//                                      URLs match). {product} is a key of
+//                                      MRMS_LAYERS (base/composite/ptype/eet).
+//   GET /api/mrms/{product}/{z}/{x}/{y}.png?t=<ISO8601>
+//                                   -> one 256px tile, rendered by NCEP for
+//                                      that tile's bbox at frame <t>.
+//                                      Immutable per (product,z,x,y,t), so
+//                                      it's cached hard at the edge.
 async function handleMRMS(request, url) {
   if (request.method !== "GET") {
     return json({ error: "Method not allowed" }, 405);
   }
   const sub = url.pathname.slice("/api/mrms/".length);
-  if (sub === "frames") return mrmsFrames();
-  const m = sub.match(/^(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/);
-  if (m) {
+  const framesMatch = sub.match(/^([a-z]+)\/frames$/);
+  if (framesMatch && MRMS_LAYERS[framesMatch[1]]) {
+    return mrmsFrames(MRMS_LAYERS[framesMatch[1]]);
+  }
+  const tileMatch = sub.match(/^([a-z]+)\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/);
+  if (tileMatch && MRMS_LAYERS[tileMatch[1]]) {
     return mrmsTile(
-      parseInt(m[1], 10),
-      parseInt(m[2], 10),
-      parseInt(m[3], 10),
+      MRMS_LAYERS[tileMatch[1]],
+      parseInt(tileMatch[2], 10),
+      parseInt(tileMatch[3], 10),
+      parseInt(tileMatch[4], 10),
       url.searchParams.get("t")
     );
   }
@@ -441,7 +454,7 @@ async function handleMRMS(request, url) {
 
 // The layer's advertised TIME dimension is a rolling ~2h list of ~2-minute
 // frames. We read it from GetCapabilities and hand back a sorted array.
-async function mrmsFrames() {
+async function mrmsFrames(layerName) {
   let upstream;
   try {
     upstream = await fetch(
@@ -462,13 +475,18 @@ async function mrmsFrames() {
   } catch (_) {
     return json({ frames: [] }, 200, 30);
   }
-  return json({ frames: parseTimeDimension(xml) }, 200, 30);
+  return json({ frames: parseTimeDimension(xml, layerName) }, 200, 30);
 }
 
-// Pull the comma-separated instants out of <Dimension name="time">…</Dimension>
-// and return the well-formed ISO ones, oldest first.
-function parseTimeDimension(xml) {
-  const m = xml.match(/<Dimension[^>]*name="time"[^>]*>([\s\S]*?)<\/Dimension>/i);
+// Pull the comma-separated instants out of the named layer's
+// <Layer>…<Name>layerName</Name>…<Dimension name="time">…</Dimension>…</Layer>
+// block (the workspace-wide GetCapabilities lists all 4 layers, so we have to
+// find the right one) and return the well-formed ISO ones, oldest first.
+function parseTimeDimension(xml, layerName) {
+  const layerBlocks = xml.match(/<Layer queryable="1"[^>]*>[\s\S]*?<\/Layer>/g) || [];
+  const block = layerBlocks.find((b) => b.includes("<Name>" + layerName + "</Name>"));
+  if (!block) return [];
+  const m = block.match(/<Dimension[^>]*name="time"[^>]*>([\s\S]*?)<\/Dimension>/i);
   if (!m) return [];
   const times = m[1]
     .split(",")
@@ -478,7 +496,7 @@ function parseTimeDimension(xml) {
   return times;
 }
 
-async function mrmsTile(z, x, y, rawTime) {
+async function mrmsTile(layerName, z, x, y, rawTime) {
   // Bounds-check the tile coords (guards the bbox math and the upstream URL).
   const dim = Math.pow(2, z);
   if (z < 0 || z > 20 || x < 0 || y < 0 || x >= dim || y >= dim) {
@@ -489,7 +507,7 @@ async function mrmsTile(z, x, y, rawTime) {
     SERVICE: "WMS",
     VERSION: "1.1.1", // 1.1.1 keeps BBOX axis order x,y for every CRS
     REQUEST: "GetMap",
-    LAYERS: MRMS_LAYER,
+    LAYERS: layerName,
     STYLES: "",
     SRS: "EPSG:3857",
     BBOX: tileBBox3857(z, x, y).join(","),
