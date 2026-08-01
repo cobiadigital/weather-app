@@ -270,8 +270,21 @@ Concretely, before you consider any UI change done:
 ## Deploying
 
 Deploy is via the Cloudflare dashboard's Git integration (Workers & Pages →
-Connect to Git). Every commit to the connected branch redeploys. No local
+Connect to Git). Every commit to the production branch redeploys. No local
 Wrangler is required. See `README.md` for the step-by-step.
+
+**Branch previews.** `wrangler.toml` sets `preview_urls = true` and
+non-production branch builds are enabled, so each branch gets
+`https://<branch-name>-weather-app.cobiadigital.workers.dev` (`/` in the branch
+name becomes `-`) plus a per-version URL, both posted to the PR by the
+Cloudflare GitHub app. The branch URL is stable across commits; the version one
+changes every build, so prefer the branch URL when sharing.
+
+⚠️ A preview URL only keeps a branch **off production** if the Workers Builds
+non-production deploy command is `npx wrangler versions upload`. The default
+`npx wrangler deploy` publishes to production from whatever branch it builds —
+with non-production builds on, that means any branch push overwrites
+bendar.app. Check this setting before assuming a branch is safely sandboxed.
 
 ## Local dev (optional)
 
