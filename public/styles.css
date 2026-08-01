@@ -369,6 +369,46 @@ button,
   font-size: 12px;
 }
 
+/* --- Single radar site ----------------------------------------------------- */
+
+/* Both of these live inside .controls, so the flex column handles their
+   spacing and the safe-area inset — no hard-coded offsets to collide with
+   #loopBar when the loop is switched on. */
+.site-pick-row {
+  gap: 10px;
+}
+.site-pick-msg {
+  flex: 1;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+.site-pick-action {
+  flex: none;
+  width: auto;
+  padding: 0 12px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.legend-row {
+  padding: 0 2px;
+}
+.legend-row img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 26px;
+  border-radius: 6px;
+}
+
+/* GeoServer renders legend labels in black ink for a white background. If the
+   LEGEND_OPTIONS font colour isn't honoured, this keeps them readable on the
+   dark panel — the same trick /tropics uses for NOAA's arrival-time overlays. */
+.legend-row.invert img {
+  filter: invert(1) hue-rotate(180deg);
+}
+
 .slider-row {
   gap: 12px;
 }
@@ -533,6 +573,14 @@ button,
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* The single-site product list sits directly under its picker button, indented
+   so it reads as belonging to it rather than as a second top-level group. */
+.site-options {
+  margin-top: 8px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(255, 255, 255, 0.12);
 }
 
 .settings-option {
@@ -723,6 +771,36 @@ button,
   background: var(--accent);
   border: 3px solid #fff;
   box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.35), 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+
+/* Radar-site markers. Same family as .me-marker but deliberately smaller and
+   muted, so "a radar" never reads as "you are here". Circles are WSR-88D
+   (NEXRAD), squares are TDWR. */
+.site-marker {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted, #94a3b8);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.site-marker.tdwr {
+  border-radius: 3px;
+}
+
+.site-marker.selected {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.35), 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+
+/* A 40px tap target around a 12px dot — the markers are small on purpose, but
+   they still have to be hittable with a thumb. */
+.site-marker::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
 }
 
 /* --- Utilities ------------------------------------------------------------ */
