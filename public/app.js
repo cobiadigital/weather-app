@@ -133,6 +133,10 @@
   const DEFAULT_VIEW = { lat: 39.5, lon: -98.35, zoom: 4 }; // continental US
   const LOCATED_ZOOM = 9;
   const REFRESH_MS = 5 * 60 * 1000; // auto-refresh radar every 5 minutes
+  // Returning to the app (tab/window regains focus) refreshes immediately
+  // only if it's been at least this long since the last refresh — a quick
+  // glance away and back shouldn't force a re-fetch.
+  const STALE_REFRESH_MS = 2 * 60 * 1000;
   const STORE_KEY = "radar.lastLocation";
   const PRODUCT_STORE_KEY = "radar.product";
   const SHARE_URL = "https://bendar.app";
@@ -203,6 +207,7 @@
   let cloudLayer; // GOES satellite cloud layer (optional)
   let meMarker;
   let refreshTimer;
+  let lastRefreshAt = 0; // Date.now() of the last actual radar refresh
   let radarProductId = loadProductId(); // selected RADAR_PRODUCTS key
   let displayedProductId = null; // product the live radarLayer is built for
 
@@ -331,6 +336,7 @@
 
     radarLayer = buildRadarLayer().addTo(map);
     displayedProductId = effectiveProductId();
+    lastRefreshAt = Date.now();
     if (currentProduct().mrmsLayer) primeMrmsLive();
     syncProductUI();
     syncLoopAvailability();
@@ -716,6 +722,7 @@
   // so there's no flash.
   function refreshRadar(userInitiated) {
     if (!radarLayer || loopOn) return; // the loop drives its own frames
+    lastRefreshAt = Date.now();
     const p = currentProduct();
     if (p.mrmsLayer) {
       // Re-resolve the newest canonical frame and repoint the layer at it.
@@ -741,6 +748,14 @@
   function scheduleRefresh() {
     clearInterval(refreshTimer);
     refreshTimer = setInterval(() => refreshRadar(false), REFRESH_MS);
+  }
+
+  // Catch up immediately if the app regained focus/visibility after sitting
+  // stale for a while (see the visibilitychange/focus listeners in bind()).
+  function refreshIfStale() {
+    if (document.visibilityState !== "visible") return;
+    if (loopOn) return; // the loop drives its own frames
+    if (Date.now() - lastRefreshAt >= STALE_REFRESH_MS) refreshRadar(false);
   }
 
   // --- Geolocation ---------------------------------------------------------
@@ -1795,11 +1810,15 @@
       closeInstallSheet();
     });
 
-    // Refresh radar when returning to the tab (iOS suspends background tabs).
-    // Don't clobber the loop if it's the active view.
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && !loopOn) refreshRadar(false);
-    });
+    // Refresh radar when returning to the app (iOS suspends background tabs,
+    // and setInterval itself gets throttled/paused while backgrounded, so
+    // scheduleRefresh's timer can't be relied on to have kept up). Only if
+    // it's actually gone stale — a quick glance away and back shouldn't force
+    // a re-fetch — and never while the loop is the active view (it drives its
+    // own frames). refreshRadar doesn't clear anything already cached, so the
+    // previous frame's tiles simply stay available until they age out.
+    document.addEventListener("visibilitychange", refreshIfStale);
+    window.addEventListener("focus", refreshIfStale);
 
     updateInstallAffordance();
     onOpacity(); // sync the slider fill + layer opacity to the default value
