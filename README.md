@@ -44,7 +44,9 @@ All data is public and comes from **NOAA / the National Weather Service**:
 - **Clouds** — optional GOES satellite (infrared) cloud-cover overlay
 - **Lightning** — optional GOES **GLM** overlay showing where lightning is
   flashing right now, updated every minute and drawn over whichever radar
-  product is showing
+  product is showing. Each ~10 km cell is rendered as a firefly-like spark
+  sized by how much lightning is in it, blended as light so it stays visible
+  over heavy reflectivity instead of being lost in it
 - **Install** — add it to your home screen as a full-screen app (a native
   prompt on Android/Chrome, guided steps on iOS Safari)
 - Active-alert pill that opens a slide-up sheet with alert details

@@ -295,10 +295,18 @@ button,
    Screen blending keeps the radar structure visible underneath.
    Kept in CSS (not baked into the tiles) so the source stays the official
    NOAA product. shareView() mirrors this on the canvas — see drawTileLayer. */
+/* Both re-rendered lightning styles blend as light rather than paint, so a
+   spark over heavy reflectivity brightens it instead of being lost in it. */
+.glm-blend {
+  mix-blend-mode: screen;
+}
+
+/* GLM_STYLE === "amber" only: flatten the raster to one electric colour.
+   brightness(0) keeps the alpha channel while zeroing the hue; the
+   invert/sepia/saturate chain builds the target colour back up. */
 .glm-tiles {
   filter: brightness(0) invert(83%) sepia(72%) saturate(1200%) hue-rotate(358deg)
     brightness(105%);
-  mix-blend-mode: screen;
 }
 
 /* Toggle buttons (Clouds / Lightning / Loop) share the row evenly.

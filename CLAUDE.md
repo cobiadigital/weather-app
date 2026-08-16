@@ -201,10 +201,29 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
 
   Two rendering details that are easy to regress:
   - RealEarth renders FED with a blue→green→red ramp, near enough to the
-    reflectivity ramp beneath it that the two are genuinely confusable. The
-    `.glm-tiles` CSS class flattens it to one electric amber (`brightness(0)`
-    keeps alpha, the invert/sepia/saturate chain rebuilds the hue) and
-    screen-blends it. Keep `GLM_CANVAS_FILTER` in `app.js` in step with it.
+    reflectivity ramp beneath it that the two are genuinely confusable, so the
+    overlay is re-rendered. `GLM_STYLE` in `app.js` picks how:
+    - `"firefly"` (default) — `glmDotTileLayer` makes each tile a `<canvas>`,
+      reads the source pixels, and redraws the frame as one spark per ~10 km
+      cell: a hot near-white core with a warm halo, its size scaled by that
+      cell's value (`cellIntensity` recovers the value by inverting the ramp —
+      hue 240° is the bottom of the scale, 0° the top). Sparks are drawn with
+      `lighter` so overlapping halos build up, and the layer screen-blends over
+      the map, which is the point: flat paint of any colour gets lost over the
+      yellows and reds of heavy reflectivity — exactly where the lightning is —
+      but light only ever brightens what's beneath it. Sparks grow with the map
+      up to `GLM_DOT_CAP_PX`, then hold; uncapped they merge into one wash by
+      ~z12. Because the result is baked into the canvas the share compositor
+      already draws, screen and shared image agree with no extra work, and the
+      `zoomend` → `redraw()` hook is what keeps the cap honest, since Leaflet
+      would otherwise just rescale the existing canvases.
+    - `"amber"` — leaves the raster alone and recolours it in CSS
+      (`.glm-tiles`: `brightness(0)` keeps alpha, the invert/sepia/saturate
+      chain rebuilds the hue). A CSS filter is invisible to the canvas, so
+      `GLM_CANVAS_FILTER` re-applies it in `drawTileLayer` — keep the two in
+      step. `.glm-blend` (the screen blending both styles share) is likewise
+      mirrored by `canvasBlend`.
+    - `"native"` — untouched, for checking values against RealEarth's legend.
   - The layer sets `maxNativeZoom: 7` (GLM's grid is ~10 km), so its tile coords
     sit *below* the map zoom. `drawTileLayer` therefore keys off
     `layer._tileZoom` and scales, rather than assuming tile z == map zoom —

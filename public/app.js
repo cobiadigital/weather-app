@@ -127,12 +127,35 @@
   // New frame every minute. Cheap to follow: one frames fetch plus a redraw of
   // ~20 tiles that are 1-4 KB each.
   const GLM_REFRESH_MS = 60 * 1000;
-  // Recolour the overlay to one amber instead of RealEarth's native
-  // blue→green→red ramp. Off shows the upstream product exactly as NOAA/SSEC
-  // render it — useful for checking values against RealEarth's own legend, but
-  // near-impossible to tell apart from reflectivity underneath. Flip to true
-  // for the shipping look.
-  const GLM_TINT = false;
+  // How the lightning overlay is drawn on top of the radar. The problem all
+  // three answer: RealEarth's native flash-extent-density ramp is blue→green→
+  // red, near enough to the reflectivity ramp underneath to be confusable.
+  //   "firefly" — redrawn as points of *light*: a hot near-white core with a
+  //               warm halo, sized by how much lightning is in the cell and
+  //               blended additively. Flat paint (even a loud orange) gets
+  //               lost over the yellows and reds of heavy reflectivity, which
+  //               is exactly where the lightning is; light can't be, because
+  //               screen blending only ever brightens what's beneath it.
+  //   "amber"   — the raster flattened to one electric colour, screen-blended.
+  //   "native"  — untouched, exactly as NOAA/SSEC publish it.
+  const GLM_STYLE = "firefly";
+  // "firefly" geometry. The tile is sampled on a GLM_DOT_CELLS × GLM_DOT_CELLS
+  // grid — 32 across a 256px z7 tile is about one dot per ~10 km GLM cell, so
+  // a dot stands for a real data cell rather than an arbitrary screen texture.
+  // Radii are fractions of the cell, so the whole thing scales with the map.
+  const GLM_DOT_CELLS = 32;
+  const GLM_DOT_MIN_R = 0.1; // faintest cell that still gets a spark
+  const GLM_DOT_MAX_R = 0.34; // hottest cell's core (the halo runs wider)
+  // …but never bigger than this on screen. Without a ceiling the sparks keep
+  // growing with the map and by ~z12 they merge into one wash. Past the cap
+  // they hold size and just spread out, which is the honest picture: GLM's
+  // grid really is ~10 km no matter how far you zoom in.
+  const GLM_DOT_CAP_PX = 7;
+  // How far the glow reaches past the core. This is what makes it read as a
+  // light source rather than a filled circle.
+  const GLM_GLOW_MULT = 2.6;
+  const GLM_CORE_COLOR = "rgba(255, 253, 235, 0.98)"; // hot centre
+  const GLM_GLOW_COLOR = "255, 196, 92"; // warm falloff (rgb triplet)
   // Must stay in step with the .glm-tiles filter in styles.css — the on-screen
   // layer uses that one, the shared image uses this one.
   const GLM_CANVAS_FILTER =
@@ -1806,24 +1829,32 @@
       setStatus("Lightning off.");
       return;
     }
-    lightningLayer = L.tileLayer(GLM_TILE_URL, {
+    const build = GLM_STYLE === "firefly" ? glmDotTileLayer : L.tileLayer;
+    lightningLayer = build(GLM_TILE_URL, {
       layer: GLM_PRODUCT,
       t: "", // pinned to the newest frame by refreshLightning() below
-      // Flash extent density paints whole storm areas, not pin-prick strikes,
-      // so it has to sit light enough to read the radar through.
-      opacity: 0.6,
+      // Sparks are small and additive, so they can sit at full strength; the
+      // raster styles have to stay light enough to read the radar underneath.
+      opacity: GLM_STYLE === "firefly" ? 1 : 0.6,
       attribution: GLM_ATTRIBUTION,
       zIndex: 6, // above the radar (zIndex 5)
       maxZoom: 15,
       maxNativeZoom: GLM_MAX_NATIVE_ZOOM,
       crossOrigin: "anonymous",
-      // Recolour + blend live in CSS (.glm-tiles); canvasFilter/canvasBlend
-      // are how shareView() reproduces them in the exported image. With
-      // GLM_TINT off, none of it is applied and the native ramp comes through
-      // on screen and in a share alike.
-      className: GLM_TINT ? "glm-tiles" : "",
-      canvasFilter: GLM_TINT ? GLM_CANVAS_FILTER : null,
-      canvasBlend: GLM_TINT ? "screen" : null,
+      // Both non-native styles blend as light against the map, which is a
+      // property of the layer rather than of its pixels — so it has to be set
+      // in CSS for the screen and repeated for the share canvas. "firefly"
+      // needs nothing else (its colour is baked into the canvas tiles the
+      // compositor already draws); "amber" additionally needs its recolour
+      // replayed, since a CSS filter is invisible to the canvas.
+      className:
+        GLM_STYLE === "amber"
+          ? "glm-blend glm-tiles"
+          : GLM_STYLE === "firefly"
+            ? "glm-blend"
+            : "",
+      canvasFilter: GLM_STYLE === "amber" ? GLM_CANVAS_FILTER : null,
+      canvasBlend: GLM_STYLE === "native" ? null : "screen",
     }).addTo(map);
     setToggle(els.lightningBtn, true);
 
@@ -1834,6 +1865,11 @@
         : "Lightning on — GLM coverage is the lower 48 only."
     );
 
+    // Dot geometry is computed per tile from the size it's drawn at, so a zoom
+    // that Leaflet would serve by rescaling the existing canvases has to
+    // re-render them instead — otherwise the dots stretch past their cap.
+    if (GLM_STYLE === "firefly") map.on("zoomend", redrawLightning);
+
     refreshLightning();
     clearInterval(lightningTimer);
     lightningTimer = setInterval(refreshLightning, GLM_REFRESH_MS);
@@ -1842,9 +1878,14 @@
   function stopLightning() {
     clearInterval(lightningTimer);
     lightningTimer = null;
+    map.off("zoomend", redrawLightning);
     if (lightningLayer) map.removeLayer(lightningLayer);
     lightningLayer = null;
     setToggle(els.lightningBtn, false);
+  }
+
+  function redrawLightning() {
+    if (lightningLayer) lightningLayer.redraw();
   }
 
   // Repoint the overlay at the newest published frame. Same trick as the radar
@@ -1864,6 +1905,142 @@
   // framesByKey memo. Its own key, since GLM updates on its own schedule.
   function glmSource() {
     return { key: "glm_" + GLM_PRODUCT, frames: GLM_FRAMES_URL };
+  }
+
+  // --- "firefly": re-render the FED raster as graduated points of light ----
+
+  // A TileLayer whose tiles are <canvas>, not <img>: it loads RealEarth's tile
+  // and redraws it as one spark per data cell, sized by how much lightning is
+  // in that cell. Doing it here rather than in CSS is what buys the
+  // size-varies-with-intensity part — a filter or mask can only apply a fixed
+  // transform to every pixel. It also means the result is baked into the
+  // element the share compositor already draws, so screen and shared image
+  // can't diverge.
+  let GlmDotLayerClass = null;
+  function glmDotTileLayer(url, opts) {
+    if (!GlmDotLayerClass) {
+      GlmDotLayerClass = L.TileLayer.extend({
+        createTile(coords, done) {
+          const tile = document.createElement("canvas");
+          // Draw at the size the tile is actually displayed at — past
+          // maxNativeZoom that's the upscaled size — so dots stay crisp
+          // instead of being a blown-up 256px bitmap.
+          const size = this.getTileSize();
+          tile.width = size.x;
+          tile.height = size.y;
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            try {
+              drawGlmDots(tile, img);
+            } catch (_) {
+              /* leave the tile blank rather than failing the layer */
+            }
+            done(null, tile);
+          };
+          // A missing frame is normal (RealEarth serves a transparent
+          // placeholder); an empty canvas is the right answer, not an error.
+          img.onerror = () => done(null, tile);
+          img.src = this.getTileUrl(coords);
+          return tile;
+        },
+      });
+    }
+    return new GlmDotLayerClass(url, opts);
+  }
+
+  function drawGlmDots(tile, img) {
+    const S = tile.width;
+    if (!S) return;
+    // Read the source at its own resolution; sampling is done in cell space so
+    // the tile's display size doesn't change which cells we find.
+    const src = document.createElement("canvas");
+    src.width = img.naturalWidth || 256;
+    src.height = img.naturalHeight || 256;
+    const sctx = src.getContext("2d");
+    sctx.drawImage(img, 0, 0);
+    const px = sctx.getImageData(0, 0, src.width, src.height).data;
+
+    const ctx = tile.getContext("2d");
+    // Sparks add to each other, so overlapping halos build into a glowing
+    // field the way real light would, instead of flat discs overpainting.
+    ctx.globalCompositeOperation = "lighter";
+    const cell = S / GLM_DOT_CELLS; // dot pitch, tile px
+    const sCell = src.width / GLM_DOT_CELLS; // same cell, source px
+    // Size ramp for this zoom: the hottest dot fills its cell until that would
+    // exceed the screen cap, and the rest of the scale is kept proportional to
+    // it so intensity stays readable at every zoom.
+    const hotR = Math.min(cell * GLM_DOT_MAX_R, GLM_DOT_CAP_PX);
+    const minFrac = GLM_DOT_MIN_R / GLM_DOT_MAX_R;
+
+    for (let row = 0; row < GLM_DOT_CELLS; row++) {
+      for (let col = 0; col < GLM_DOT_CELLS; col++) {
+        const t = cellIntensity(
+          px,
+          src.width,
+          Math.floor(col * sCell),
+          Math.floor(row * sCell),
+          Math.max(1, Math.floor(sCell))
+        );
+        if (t <= 0) continue;
+        const core = hotR * (minFrac + t * (1 - minFrac));
+        const glow = core * GLM_GLOW_MULT;
+        const cx = (col + 0.5) * cell;
+        const cy = (row + 0.5) * cell;
+        // Core → warm halo → nothing. The halo's alpha also tracks intensity,
+        // so a weak cell is a faint pinprick and a hot one genuinely burns.
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
+        grad.addColorStop(0, GLM_CORE_COLOR);
+        grad.addColorStop(
+          Math.min(0.9, core / glow),
+          "rgba(" + GLM_GLOW_COLOR + ", " + (0.34 + 0.4 * t).toFixed(3) + ")"
+        );
+        grad.addColorStop(1, "rgba(" + GLM_GLOW_COLOR + ", 0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, glow, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Mean flash density over one cell, 0-1. RealEarth encodes the value as a
+  // colour on a blue→green→yellow→red ramp, so the hue is the reading: 240° is
+  // the bottom of the scale, 0° the top. Transparent pixels are no-data and
+  // don't dilute the average — a cell only half covered by a storm should read
+  // as strong as the half that's lit.
+  function cellIntensity(px, w, x0, y0, span) {
+    let sum = 0;
+    let n = 0;
+    for (let y = y0; y < y0 + span; y++) {
+      for (let x = x0; x < x0 + span; x++) {
+        const i = (y * w + x) * 4;
+        if (px[i + 3] < 8) continue;
+        const r = px[i];
+        const g = px[i + 1];
+        const b = px[i + 2];
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const d = max - min;
+        let t;
+        if (d < 12) {
+          // Washed-out/near-grey pixel: no usable hue, call it mid-scale.
+          t = 0.5;
+        } else {
+          let h;
+          if (max === r) h = ((g - b) / d) % 6;
+          else if (max === g) h = (b - r) / d + 2;
+          else h = (r - g) / d + 4;
+          h *= 60;
+          if (h < 0) h += 360;
+          // Past the blue end the ramp wraps into magenta — that's the top.
+          t = h > 260 ? 1 : (240 - h) / 240;
+        }
+        sum += Math.max(0, Math.min(1, t));
+        n++;
+      }
+    }
+    return n ? sum / n : 0;
   }
 
   // --- Radar loop (last 4 hours) -------------------------------------------
@@ -2426,6 +2603,7 @@
     const T = 256; // Leaflet's default tile size
     const op = layer.options.opacity == null ? 1 : layer.options.opacity;
     if (op <= 0) return;
+
     // A layer with maxNativeZoom (the GLM overlay) keeps serving its deepest
     // real tiles past that zoom and lets the map scale them up, so its tile
     // coords aren't the map's zoom. Draw at whatever zoom the layer is
