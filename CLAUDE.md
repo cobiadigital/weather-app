@@ -217,6 +217,13 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
       already draws, screen and shared image agree with no extra work, and the
       `zoomend` → `redraw()` hook is what keeps the cap honest, since Leaflet
       would otherwise just rescale the existing canvases.
+      `cellIntensity` counts a source pixel as data only if it has real
+      chroma. Transparency alone is not a safe test: RealEarth's "no data"
+      tile is a 1-bit PNG whose transparency lives in a tRNS chunk, and a
+      decoder that ignores it (iOS Safari did) hands back an opaque *black*
+      tile. Reading black as mid-scale painted a full grid of identical sparks
+      over every empty tile — lightning where there was none. Black, white and
+      grey are never on the ramp, so they are no-data.
     - `"amber"` — leaves the raster alone and recolours it in CSS
       (`.glm-tiles`: `brightness(0)` keeps alpha, the invert/sepia/saturate
       chain rebuilds the hue). A CSS filter is invisible to the canvas, so

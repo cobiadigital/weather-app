@@ -2006,36 +2006,40 @@
 
   // Mean flash density over one cell, 0-1. RealEarth encodes the value as a
   // colour on a blue→green→yellow→red ramp, so the hue is the reading: 240° is
-  // the bottom of the scale, 0° the top. Transparent pixels are no-data and
-  // don't dilute the average — a cell only half covered by a storm should read
-  // as strong as the half that's lit.
+  // the bottom of the scale, 0° the top. No-data pixels don't dilute the
+  // average — a cell only half covered by a storm should read as strong as the
+  // half that's lit.
+  //
+  // What counts as data is deliberately strict: every colour on that ramp is
+  // fully saturated, so a pixel must have real chroma. Transparency alone is
+  // not a safe test — RealEarth's "no data" tile is a 1-bit PNG whose
+  // transparency lives in a tRNS chunk, and a decoder that ignores it hands us
+  // an opaque *black* tile. Reading those as mid-scale painted a full grid of
+  // identical sparks over every empty tile (i.e. lightning where there was
+  // none). Black, white and grey are never values here, so they're no-data.
   function cellIntensity(px, w, x0, y0, span) {
     let sum = 0;
     let n = 0;
     for (let y = y0; y < y0 + span; y++) {
       for (let x = x0; x < x0 + span; x++) {
         const i = (y * w + x) * 4;
-        if (px[i + 3] < 8) continue;
+        // Written so an out-of-range read (undefined) fails the test too.
+        if (!(px[i + 3] > 8)) continue;
         const r = px[i];
         const g = px[i + 1];
         const b = px[i + 2];
         const max = Math.max(r, g, b);
         const min = Math.min(r, g, b);
         const d = max - min;
-        let t;
-        if (d < 12) {
-          // Washed-out/near-grey pixel: no usable hue, call it mid-scale.
-          t = 0.5;
-        } else {
-          let h;
-          if (max === r) h = ((g - b) / d) % 6;
-          else if (max === g) h = (b - r) / d + 2;
-          else h = (r - g) / d + 4;
-          h *= 60;
-          if (h < 0) h += 360;
-          // Past the blue end the ramp wraps into magenta — that's the top.
-          t = h > 260 ? 1 : (240 - h) / 240;
-        }
+        if (max < 40 || d < 12) continue; // black / white / grey: not on the ramp
+        let h;
+        if (max === r) h = ((g - b) / d) % 6;
+        else if (max === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h *= 60;
+        if (h < 0) h += 360;
+        // Past the blue end the ramp wraps into magenta — that's the top.
+        const t = h > 260 ? 1 : (240 - h) / 240;
         sum += Math.max(0, Math.min(1, t));
         n++;
       }
