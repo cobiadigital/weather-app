@@ -42,6 +42,9 @@ All data is public and comes from **NOAA / the National Weather Service**:
   and a timestamp. On the MRMS default, frames you've already viewed replay
   instantly from an on-device cache instead of re-downloading
 - **Clouds** — optional GOES satellite (infrared) cloud-cover overlay
+- **Lightning** — optional GOES **GLM** overlay showing where lightning is
+  flashing right now, updated every minute and drawn over whichever radar
+  product is showing
 - **Install** — add it to your home screen as a full-screen app (a native
   prompt on Android/Chrome, guided steps on iOS Safari)
 - Active-alert pill that opens a slide-up sheet with alert details
@@ -79,6 +82,15 @@ All data is public and comes from **NOAA / the National Weather Service**:
 - **Clouds** — GOES East infrared satellite composite, also from IEM. This is a
   separate *satellite* product (it shows cloud cover, not precipitation); the
   NEXRAD radar product does not include cloud coverage.
+- **Lightning** — GOES **GLM** (Geostationary Lightning Mapper) flash extent
+  density, proxied through the Worker at `/api/glm/*` from UW-Madison SSEC's
+  [RealEarth](https://realearth.ssec.wisc.edu/). Note that `api.weather.gov`
+  carries **no** lightning data: the NWS licenses its ground-strike feed (NLDN)
+  commercially and can't redistribute it. GLM is the public alternative — an
+  optical detector on GOES that sees *total* lightning (in-cloud as well as
+  cloud-to-ground) on a ~10 km grid, republished every minute as a 5-minute
+  accumulation. It maps whole electrified storm areas rather than individual
+  strike points, and the CONUS sector covers the lower 48 only.
 - **Alerts** — the NWS API, proxied through the Worker (see below).
 - **ZIP centroids** — `public/zip3.json`, a compact `{ "zip3": [lat, lon] }`
   table keyed by 3-digit ZIP prefix (~900 entries, ~18 KB, lazily fetched only
@@ -92,7 +104,8 @@ All data is public and comes from **NOAA / the National Weather Service**:
 ```
 wrangler.toml      Worker + static-assets config
 src/index.js       Worker: /api/nws/* (NWS), /api/nhc/* (hurricanes),
-                   /api/mrms/* + /api/site/* (radar tiles), /api/legend/*
+                   /api/mrms/* + /api/site/* (radar tiles), /api/glm/*
+                   (lightning tiles), /api/legend/*
 public/            Static front-end (served automatically at the edge)
   index.html       main radar page
   styles.css

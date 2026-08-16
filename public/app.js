@@ -113,6 +113,27 @@
   const CLOUD_TILE_URL =
     "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png";
 
+  // GOES GLM lightning (via our Worker — see /api/glm/* in src/index.js).
+  // Flash extent density: how many flashes hit each ~10 km cell in the last
+  // 5 minutes, republished every minute. It's *total* lightning (in-cloud as
+  // well as cloud-to-ground) seen optically from orbit, so it's an overlay on
+  // top of the radar rather than a radar product of its own.
+  const GLM_PRODUCT = "fed";
+  const GLM_TILE_URL = "/api/glm/{layer}/{z}/{x}/{y}.png?t={t}";
+  const GLM_FRAMES_URL = "/api/glm/" + GLM_PRODUCT + "/frames";
+  // GLM's grid is ~10 km, so RealEarth's pyramid stops here; Leaflet upscales
+  // the z7 tile past this rather than showing nothing.
+  const GLM_MAX_NATIVE_ZOOM = 7;
+  // New frame every minute. Cheap to follow: one frames fetch plus a redraw of
+  // ~20 tiles that are 1-4 KB each.
+  const GLM_REFRESH_MS = 60 * 1000;
+  // Must stay in step with the .glm-tiles filter in styles.css — the on-screen
+  // layer uses that one, the shared image uses this one.
+  const GLM_CANVAS_FILTER =
+    "brightness(0) invert(83%) sepia(72%) saturate(1200%) hue-rotate(358deg) brightness(105%)";
+  const GLM_ATTRIBUTION =
+    'Lightning: <a href="https://www.nesdis.noaa.gov/our-satellites/currently-flying/goes-east-west/geostationary-lightning-mapper-glm">NOAA GOES GLM</a> via <a href="https://realearth.ssec.wisc.edu/">SSEC RealEarth</a>';
+
   // MRMS (via our Worker). The tile template carries {layer} (which MRMS
   // product — see RADAR_PRODUCTS' mrmsLayer) and {t} (the frame time both the
   // live layer and the loop pin to — identical URLs => Cache Storage hits).
@@ -246,6 +267,7 @@
     alertList: document.getElementById("alertList"),
     alertClose: document.getElementById("alertClose"),
     cloudsBtn: document.getElementById("cloudsBtn"),
+    lightningBtn: document.getElementById("lightningBtn"),
     loopBtn: document.getElementById("loopBtn"),
     shareBtn: document.getElementById("shareBtn"),
     settingsBtn: document.getElementById("settingsBtn"),
@@ -282,6 +304,8 @@
   let basemapLayer; // CARTO dark base tiles
   let radarLayer; // live radar (current frame)
   let cloudLayer; // GOES satellite cloud layer (optional)
+  let lightningLayer; // GOES GLM lightning overlay (optional)
+  let lightningTimer; // 1-minute frame follower, only while the overlay is on
   let meMarker;
   let refreshTimer;
   let lastRefreshAt = 0; // Date.now() of the last actual radar refresh
@@ -833,9 +857,13 @@
 
   // Fetch + memoize one tile source's canonical frame list
   // (Date[], oldest -> newest).
-  async function ensureFrames(src) {
+  // `maxAgeMs` overrides how stale a memoized list may be. The lightning
+  // overlay polls on the same 60s beat as the default TTL, so on the default
+  // it would coin-flip between a real fetch and the cached list and sit a
+  // frame behind; it passes 0 to always re-ask.
+  async function ensureFrames(src, maxAgeMs = MRMS_FRAMES_TTL_MS) {
     const entry = framesByKey.get(src.key);
-    if (entry && entry.frames.length && Date.now() - entry.at < MRMS_FRAMES_TTL_MS) {
+    if (entry && entry.frames.length && Date.now() - entry.at < maxAgeMs) {
       return entry.frames;
     }
     try {
@@ -1421,6 +1449,10 @@
   // stale for a while (see the visibilitychange/focus listeners in bind()).
   function refreshIfStale() {
     if (document.visibilityState !== "visible") return;
+    // Background tabs get their timers throttled, so the lightning overlay can
+    // be several frames behind on return. It's independent of the loop, hence
+    // ahead of that early return.
+    if (lightningLayer) refreshLightning();
     if (loopOn) return; // the loop drives its own frames
     if (Date.now() - lastRefreshAt >= STALE_REFRESH_MS) refreshRadar(false);
   }
@@ -1750,6 +1782,80 @@
     }).addTo(map);
     setToggle(els.cloudsBtn, true);
     setStatus("Cloud cover (GOES satellite) on.");
+  }
+
+  // --- Lightning (GOES GLM) layer ------------------------------------------
+
+  // Flash extent density from the GOES lightning mapper, drawn *above* the
+  // radar so it isn't buried under a reflectivity wash (it marks which part of
+  // a storm is electrified, which is only useful next to the storm itself).
+  // Tiles are timestamped like the MRMS ones, but this
+  // layer deliberately skips the Cache Storage pipeline — there's no lightning
+  // loop to replay, and a frame a minute would churn the tile budget that the
+  // radar loop depends on. Immutable URLs mean the ordinary HTTP cache still
+  // does the work.
+  function toggleLightning() {
+    if (lightningLayer) {
+      stopLightning();
+      setStatus("Lightning off.");
+      return;
+    }
+    lightningLayer = L.tileLayer(GLM_TILE_URL, {
+      layer: GLM_PRODUCT,
+      t: "", // pinned to the newest frame by refreshLightning() below
+      // Flash extent density paints whole storm areas, not pin-prick strikes,
+      // so it has to sit light enough to read the radar through.
+      opacity: 0.6,
+      attribution: GLM_ATTRIBUTION,
+      zIndex: 6, // above the radar (zIndex 5)
+      maxZoom: 15,
+      maxNativeZoom: GLM_MAX_NATIVE_ZOOM,
+      crossOrigin: "anonymous",
+      // Recolour + blend live in CSS (.glm-tiles); canvasFilter/canvasBlend
+      // are how shareView() reproduces them in the exported image.
+      className: "glm-tiles",
+      canvasFilter: GLM_CANVAS_FILTER,
+      canvasBlend: "screen",
+    }).addTo(map);
+    setToggle(els.lightningBtn, true);
+
+    const c = map.getCenter();
+    setStatus(
+      inConus(c.lat, c.lng)
+        ? "Lightning (GOES GLM) on."
+        : "Lightning on — GLM coverage is the lower 48 only."
+    );
+
+    refreshLightning();
+    clearInterval(lightningTimer);
+    lightningTimer = setInterval(refreshLightning, GLM_REFRESH_MS);
+  }
+
+  function stopLightning() {
+    clearInterval(lightningTimer);
+    lightningTimer = null;
+    if (lightningLayer) map.removeLayer(lightningLayer);
+    lightningLayer = null;
+    setToggle(els.lightningBtn, false);
+  }
+
+  // Repoint the overlay at the newest published frame. Same trick as the radar
+  // refresh: only options.t changes, so redraw() beats setUrl().
+  async function refreshLightning() {
+    if (!lightningLayer) return;
+    const frames = await ensureFrames(glmSource(), 0);
+    if (!lightningLayer) return; // toggled off while we were waiting
+    const newest = frames.length ? frames[frames.length - 1] : null;
+    const t = newest ? isoUTC(newest) : "";
+    if (lightningLayer.options.t === t) return; // no new frame yet
+    lightningLayer.options.t = t;
+    lightningLayer.redraw();
+  }
+
+  // Shaped like tileSource()'s result so it can share ensureFrames() and the
+  // framesByKey memo. Its own key, since GLM updates on its own schedule.
+  function glmSource() {
+    return { key: "glm_" + GLM_PRODUCT, frames: GLM_FRAMES_URL };
   }
 
   // --- Radar loop (last 4 hours) -------------------------------------------
@@ -2278,7 +2384,7 @@
     ctx.fillRect(0, 0, size.x, size.y);
 
     // Bottom-to-top, mirroring the on-screen z-order:
-    // basemap → clouds (zIndex 4) → radar (zIndex 5).
+    // basemap → clouds (zIndex 4) → radar (zIndex 5) → lightning (zIndex 6).
     drawTileLayer(ctx, basemapLayer, zoom, origin);
     if (cloudLayer) drawTileLayer(ctx, cloudLayer, zoom, origin);
     if (loopOn && loopLayers[loopIndex]) {
@@ -2286,6 +2392,7 @@
     } else if (radarLayer && map.hasLayer(radarLayer)) {
       drawTileLayer(ctx, radarLayer, zoom, origin);
     }
+    if (lightningLayer) drawTileLayer(ctx, lightningLayer, zoom, origin);
 
     if (meMarker) {
       const p = map.latLngToContainerPoint(meMarker.getLatLng());
@@ -2311,23 +2418,41 @@
     const T = 256; // Leaflet's default tile size
     const op = layer.options.opacity == null ? 1 : layer.options.opacity;
     if (op <= 0) return;
+    // A layer with maxNativeZoom (the GLM overlay) keeps serving its deepest
+    // real tiles past that zoom and lets the map scale them up, so its tile
+    // coords aren't the map's zoom. Draw at whatever zoom the layer is
+    // actually rendering, scaled to match. For every other layer _tileZoom is
+    // the map zoom and this collapses to size = 256.
+    const tz = layer._tileZoom == null ? zoom : layer._tileZoom;
+    const size = T * Math.pow(2, zoom - tz);
     ctx.globalAlpha = op;
+    // Match whatever CSS is doing to this layer on screen (the lightning
+    // overlay is recoloured and screen-blended). Browsers without ctx.filter
+    // just export the layer's own colours — a duller share, not a broken one.
+    if (layer.options.canvasFilter && "filter" in ctx) {
+      ctx.filter = layer.options.canvasFilter;
+    }
+    if (layer.options.canvasBlend) {
+      ctx.globalCompositeOperation = layer.options.canvasBlend;
+    }
     for (const key in tiles) {
       const tile = tiles[key];
       if (!tile.current || !tile.loaded || !tile.el) continue;
-      if (!tile.coords || tile.coords.z !== zoom) continue;
+      if (!tile.coords || tile.coords.z !== tz) continue;
       const el = tile.el;
       // Skip broken/undecoded images — drawImage would throw on them.
       if (el.tagName === "IMG" && !el.naturalWidth) continue;
-      const x = tile.coords.x * T - origin.x;
-      const y = tile.coords.y * T - origin.y;
+      const x = tile.coords.x * size - origin.x;
+      const y = tile.coords.y * size - origin.y;
       try {
-        ctx.drawImage(el, x, y, T, T);
+        ctx.drawImage(el, x, y, size, size);
       } catch (_) {
         /* one bad tile shouldn't sink the whole capture */
       }
     }
     ctx.globalAlpha = 1;
+    if ("filter" in ctx) ctx.filter = "none";
+    ctx.globalCompositeOperation = "source-over";
   }
 
   // The location marker, matching the CSS .me-marker (accent dot, white ring,
@@ -2350,7 +2475,29 @@
   // Branding + timestamp + source attribution along the bottom edge. Two rows
   // (title/time, then attribution) so nothing collides on a narrow phone width.
   function drawCaption(ctx, size) {
-    const barH = 52;
+    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
+    const x = 12;
+
+    // Credit every source that's actually in the frame. With the lightning
+    // overlay on, that's one line too many for a 390px phone, so it breaks in
+    // two and the bar grows — nobody's attribution gets clipped off the edge.
+    ctx.font = "400 10px " + font;
+    const credits = ["Radar: NWS NEXRAD / IEM"];
+    if (lightningLayer) credits.push("Lightning: GOES GLM / SSEC RealEarth");
+    credits.push("© OpenStreetMap, © CARTO");
+    const sep = "  ·  ";
+    const creditLines = [];
+    for (const part of credits) {
+      const last = creditLines.length - 1;
+      const merged = last < 0 ? part : creditLines[last] + sep + part;
+      if (last >= 0 && ctx.measureText(merged).width <= size.x - x * 2) {
+        creditLines[last] = merged;
+      } else {
+        creditLines.push(part);
+      }
+    }
+
+    const barH = 52 + (creditLines.length - 1) * 13;
     const top = size.y - barH;
     const grad = ctx.createLinearGradient(0, top - 14, 0, size.y);
     grad.addColorStop(0, "rgba(11, 18, 32, 0)");
@@ -2358,8 +2505,6 @@
     ctx.fillStyle = grad;
     ctx.fillRect(0, top - 14, size.x, barH + 14);
 
-    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
-    const x = 12;
     ctx.textBaseline = "alphabetic";
     ctx.textAlign = "left";
 
@@ -2372,14 +2517,12 @@
     ctx.font = "400 13px " + font;
     ctx.fillText("  ·  " + captionStamp(), x + brandW, top + 22);
 
-    // Row 2: source attribution (OSM/CARTO/IEM licensing).
+    // Row 2 (and 3, with lightning on): source attribution.
     ctx.fillStyle = "rgba(219, 232, 255, 0.5)";
     ctx.font = "400 10px " + font;
-    ctx.fillText(
-      "Radar: NWS NEXRAD / IEM  ·  © OpenStreetMap, © CARTO",
-      x,
-      top + 42
-    );
+    creditLines.forEach((line, i) => {
+      ctx.fillText(line, x, top + 42 + i * 13);
+    });
   }
 
   function captionStamp() {
@@ -2450,6 +2593,7 @@
     els.alertPill.addEventListener("click", openSheet);
     els.alertClose.addEventListener("click", closeSheet);
     els.cloudsBtn.addEventListener("click", toggleClouds);
+    els.lightningBtn.addEventListener("click", toggleLightning);
     els.loopBtn.addEventListener("click", toggleLoop);
     els.shareBtn.addEventListener("click", shareView);
     els.settingsBtn.addEventListener("click", toggleSettingsSheet);

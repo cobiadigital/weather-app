@@ -25,9 +25,9 @@ Assets**. All data is public and comes from NOAA / the NWS.
 - **`src/index.js`** — the Worker. It handles `/api/nws/*` (proxying
   `https://api.weather.gov`), `/api/nhc/*` (the National Hurricane Center),
   `/api/mrms/*` + `/api/site/*` (re-tiling NCEP's MRMS mosaic and single-radar
-  WMS — see below) and `/api/legend/*`, so it can set the `User-Agent` those
-  services require (browsers can't set that header), re-tile where needed, and
-  cache responses at the edge.
+  WMS — see below), `/api/glm/*` (GOES lightning tiles) and `/api/legend/*`, so
+  it can set the `User-Agent` those services require (browsers can't set that
+  header), re-tile where needed, and cache responses at the edge.
 - **`wrangler.toml`** — binds `public/` as static assets and points `main` at
   the Worker.
 
@@ -168,6 +168,47 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
   isn't reporting (indistinguishable on screen from clear skies), so
   `siteOutage` temporarily forces the mosaic via `effectiveProductId()` while
   leaving the saved choice alone, so the site returns by itself.
+- **Lightning (GOES GLM)** — an optional overlay (the **Lightning** toggle),
+  not a radar product: it draws *on top of* whatever radar is selected.
+  **`api.weather.gov` has no lightning data at all** — NWS licenses its
+  ground-strike feed (Vaisala NLDN) commercially and can't redistribute it, and
+  NCEP's GeoServer publishes none either. The public alternative is **GLM**, the
+  optical lightning mapper on GOES, which sees *total* lightning (in-cloud and
+  cloud-to-ground). The raw L2 granules on AWS are netCDF-4/HDF5 every 20 s —
+  unparseable in a Worker without a WASM HDF5 reader, which the no-build-step
+  rule rules out — so tiles come from UW-Madison SSEC's **RealEarth**, which
+  already renders the `GOESEastGLMFEDRadC` product (flash extent density: how
+  many flashes hit each ~10 km cell in the last 5 minutes, republished every
+  minute) as a Web Mercator XYZ pyramid.
+  - `GET /api/glm/{product}/frames` → RealEarth's `/api/times` converted to the
+    same sorted-ISO shape `/api/mrms/*/frames` returns, windowed to 2 h.
+    `{product}` is checked against the `GLM_PRODUCTS` allowlist.
+  - `GET /api/glm/{product}/{z}/{x}/{y}.png?t=<iso>` → proxies
+    `realearth…/tiles/{product}/{YYYYMMDD}/{HHMMSS}/{z}/{x}/{y}.png`. The
+    upstream path segments are rebuilt from the *parsed* `t`, so only digits we
+    generated ourselves reach the outbound URL. Unlike MRMS there's nothing to
+    re-tile — the proxy exists to set a real `cache-control` (RealEarth sends
+    `no-store`) and keep the browser off a third-party host.
+
+  Client-side it deliberately stays *outside* the Cache Storage pipeline: there
+  is no lightning loop to replay, and a new frame every minute would churn the
+  tile budget the radar loop depends on (`tileUrlPrefix` would also rank every
+  GLM entry as non-active and shed it first). Immutable `?t=` URLs mean the
+  ordinary HTTP cache still does the work. `refreshLightning()` polls on a
+  1-minute timer while the overlay is on, and passes `maxAgeMs: 0` to
+  `ensureFrames` — on the default 60 s memo TTL it would race its own beat and
+  sit a frame behind.
+
+  Two rendering details that are easy to regress:
+  - RealEarth renders FED with a blue→green→red ramp, near enough to the
+    reflectivity ramp beneath it that the two are genuinely confusable. The
+    `.glm-tiles` CSS class flattens it to one electric amber (`brightness(0)`
+    keeps alpha, the invert/sepia/saturate chain rebuilds the hue) and
+    screen-blends it. Keep `GLM_CANVAS_FILTER` in `app.js` in step with it.
+  - The layer sets `maxNativeZoom: 7` (GLM's grid is ~10 km), so its tile coords
+    sit *below* the map zoom. `drawTileLayer` therefore keys off
+    `layer._tileZoom` and scales, rather than assuming tile z == map zoom —
+    without that the share snapshot silently drops the overlay entirely.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES

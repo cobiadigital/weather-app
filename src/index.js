@@ -7,6 +7,7 @@
  *   - /api/nhc/*    — National Hurricane Center data for the /tropics page
  *   - /api/mrms/*   — NCEP's MRMS mosaic WMS re-served as {z}/{x}/{y} tiles
  *   - /api/site/*   — the same, for an individual radar site (NEXRAD / TDWR)
+ *   - /api/glm/*    — GOES GLM lightning (flash extent density) tiles
  *   - /api/legend/* — GeoServer legend images for the single-site products
  *
  * Why proxy instead of calling these straight from the browser:
@@ -82,6 +83,30 @@ const LEGEND_REF = Object.assign(Object.create(null), {
   bvel: "tatl",
 });
 
+// GOES GLM lightning, via UW-Madison SSEC's RealEarth. GLM is the optical
+// lightning mapper on GOES — it sees *total* lightning (in-cloud and
+// cloud-to-ground) and is fully public NOAA data, unlike the ground strike
+// networks (NLDN/ENTLN) the NWS licenses commercially and cannot redistribute.
+// api.weather.gov carries no lightning at all, so this is the route in.
+//
+// RealEarth already turns the 20-second netCDF granules into a Web Mercator
+// XYZ pyramid, so unlike MRMS there's nothing to re-tile — we proxy to set a
+// real cache-control (RealEarth sends `no-store`) and to keep the browser off
+// a third-party host. Tile URLs take the frame time as a path segment:
+//   /tiles/{product}/{YYYYMMDD}/{HHMMSS}/{z}/{x}/{y}.png
+const REALEARTH_BASE = "https://realearth.ssec.wisc.edu/";
+// Keyed by the path segment app.js requests (/api/glm/<key>/...); values are
+// RealEarth product ids. Object.create(null) so inherited names can't
+// masquerade as products in the allowlist check (as with MRMS_LAYERS).
+const GLM_PRODUCTS = Object.assign(Object.create(null), {
+  // Flash extent density: flashes per grid cell over a 5-minute window,
+  // published once a minute. CONUS sector only.
+  fed: "GOESEastGLMFEDRadC",
+});
+// RealEarth keeps days of frames; the overlay only ever shows the newest, and
+// a long list is dead weight on cellular. Trim to a couple of hours.
+const GLM_WINDOW_MS = 2 * 60 * 60 * 1000;
+
 // Half-width of the web-mercator (EPSG:3857) world square, in metres.
 const WEB_MERCATOR_MAX = 20037508.342789244;
 
@@ -118,6 +143,10 @@ export default {
 
     if (pathname.startsWith("/api/site/")) {
       return handleSite(request, url);
+    }
+
+    if (pathname.startsWith("/api/glm/")) {
+      return handleGLM(request, url);
     }
 
     if (pathname.startsWith("/api/legend/")) {
@@ -543,6 +572,141 @@ async function handleSite(request, url) {
   }
 
   return json({ error: "Not found" }, 404);
+}
+
+// ---------------------------------------------------------------------------
+// GLM lightning (/api/glm/*) — GOES flash extent density, proxied from SSEC.
+// ---------------------------------------------------------------------------
+//
+//   GET /api/glm/{product}/frames -> { frames: [ISO8601, …] } newest last
+//   GET /api/glm/{product}/{z}/{x}/{y}.png?t=<ISO8601>
+//
+// Deliberately the same contract as /api/mrms/* so the client can reuse its
+// frame-snapping helpers, but the upstream is already tiled: this is a proxy,
+// not a re-tiler. {product} is checked against GLM_PRODUCTS before use.
+async function handleGLM(request, url) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const sub = url.pathname.slice("/api/glm/".length);
+
+  const framesMatch = sub.match(/^([a-z]+)\/frames$/);
+  if (framesMatch && GLM_PRODUCTS[framesMatch[1]]) {
+    return glmFrames(GLM_PRODUCTS[framesMatch[1]]);
+  }
+
+  const tileMatch = sub.match(/^([a-z]+)\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/);
+  if (tileMatch && GLM_PRODUCTS[tileMatch[1]]) {
+    return glmTile(
+      GLM_PRODUCTS[tileMatch[1]],
+      parseInt(tileMatch[2], 10),
+      parseInt(tileMatch[3], 10),
+      parseInt(tileMatch[4], 10),
+      url.searchParams.get("t")
+    );
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+// RealEarth's frame index for a product: {"<product>": ["YYYYMMDD.HHMMSS", …]}.
+// Hand it back as the sorted ISO array the client's ensureFrames() expects,
+// windowed to the last couple of hours.
+async function glmFrames(product) {
+  let upstream;
+  try {
+    upstream = await fetch(
+      REALEARTH_BASE + "api/times?products=" + encodeURIComponent(product),
+      {
+        headers: { "User-Agent": USER_AGENT },
+        // New frame every minute; 30s at the edge keeps it fresh without
+        // making one request per viewer.
+        cf: { cacheTtl: 30, cacheEverything: true },
+      }
+    );
+  } catch (_) {
+    return json({ frames: [] }, 200, 15);
+  }
+  if (!upstream.ok) return json({ frames: [] }, 200, 15);
+
+  let data;
+  try {
+    data = await upstream.json();
+  } catch (_) {
+    return json({ frames: [] }, 200, 15);
+  }
+
+  const cutoff = Date.now() - GLM_WINDOW_MS;
+  const frames = [];
+  for (const stamp of data[product] || []) {
+    const iso = glmStampToISO(stamp);
+    if (!iso) continue;
+    if (Date.parse(iso) < cutoff) continue;
+    frames.push(iso);
+  }
+  frames.sort();
+  return json({ frames }, 200, 15);
+}
+
+// "20260815.233400" -> "2026-08-15T23:34:00Z" (null if it isn't that shape).
+function glmStampToISO(stamp) {
+  const m = String(stamp).match(/^(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
+}
+
+// One 256px lightning tile. A valid ?t= pins the frame (and makes the tile
+// immutable); anything malformed falls back to RealEarth's "latest" path.
+// The upstream path segments are rebuilt from the *parsed* time, so only
+// digits we generated ourselves ever reach the outbound URL.
+async function glmTile(product, z, x, y, rawTime) {
+  const dim = Math.pow(2, z);
+  if (z < 0 || z > 20 || x < 0 || y < 0 || x >= dim || y >= dim) {
+    return new Response("Bad tile", { status: 400 });
+  }
+
+  let stamp = null;
+  const t = String(rawTime || "");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(t)) {
+    const d = new Date(t);
+    if (!isNaN(d.getTime())) {
+      const p2 = (n) => String(n).padStart(2, "0");
+      stamp =
+        `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}/` +
+        `${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}`;
+    }
+  }
+
+  const path =
+    REALEARTH_BASE +
+    "tiles/" +
+    product +
+    "/" +
+    (stamp ? stamp + "/" : "") +
+    `${z}/${x}/${y}.png`;
+
+  let upstream;
+  try {
+    upstream = await fetch(path, {
+      headers: { "User-Agent": USER_AGENT },
+      // (product,z,x,y,t) names one immutable image. RealEarth itself sends
+      // no-store, so the edge cache here is the only one that helps.
+      cf: { cacheTtl: stamp ? 3600 : 30, cacheEverything: true },
+    });
+  } catch (_) {
+    return new Response("Upstream error", { status: 502 });
+  }
+  if (!upstream.ok) return new Response("Upstream error", { status: 502 });
+
+  const body = await upstream.arrayBuffer();
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") || "image/png");
+  headers.set("access-control-allow-origin", "*");
+  headers.set(
+    "cache-control",
+    stamp ? "public, max-age=86400, immutable" : "public, max-age=60"
+  );
+  return new Response(body, { status: 200, headers });
 }
 
 // GeoServer's rendered legend for one site product. Keyed by product only —
