@@ -127,6 +127,12 @@
   // New frame every minute. Cheap to follow: one frames fetch plus a redraw of
   // ~20 tiles that are 1-4 KB each.
   const GLM_REFRESH_MS = 60 * 1000;
+  // Recolour the overlay to one amber instead of RealEarth's native
+  // blue→green→red ramp. Off shows the upstream product exactly as NOAA/SSEC
+  // render it — useful for checking values against RealEarth's own legend, but
+  // near-impossible to tell apart from reflectivity underneath. Flip to true
+  // for the shipping look.
+  const GLM_TINT = false;
   // Must stay in step with the .glm-tiles filter in styles.css — the on-screen
   // layer uses that one, the shared image uses this one.
   const GLM_CANVAS_FILTER =
@@ -1812,10 +1818,12 @@
       maxNativeZoom: GLM_MAX_NATIVE_ZOOM,
       crossOrigin: "anonymous",
       // Recolour + blend live in CSS (.glm-tiles); canvasFilter/canvasBlend
-      // are how shareView() reproduces them in the exported image.
-      className: "glm-tiles",
-      canvasFilter: GLM_CANVAS_FILTER,
-      canvasBlend: "screen",
+      // are how shareView() reproduces them in the exported image. With
+      // GLM_TINT off, none of it is applied and the native ramp comes through
+      // on screen and in a share alike.
+      className: GLM_TINT ? "glm-tiles" : "",
+      canvasFilter: GLM_TINT ? GLM_CANVAS_FILTER : null,
+      canvasBlend: GLM_TINT ? "screen" : null,
     }).addTo(map);
     setToggle(els.lightningBtn, true);
 
