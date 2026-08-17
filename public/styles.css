@@ -286,10 +286,45 @@ button,
   animation: spin 0.8s linear infinite;
 }
 
-/* Toggle buttons (Clouds / Loop) share the row evenly.
-   Install is icon-only next to Refresh. Share lives in the top bar. */
+/* GLM lightning overlay. RealEarth renders flash-extent density with a
+   blue→green→red ramp — near enough to the reflectivity ramp underneath that
+   the two are genuinely hard to tell apart on a phone. brightness(0) flattens
+   every visible pixel to black while keeping the alpha channel, and the
+   invert/sepia/saturate chain builds that back up into one electric amber, so
+   presence reads as lightning and nothing else on the map is that colour.
+   Screen blending keeps the radar structure visible underneath.
+   Kept in CSS (not baked into the tiles) so the source stays the official
+   NOAA product. shareView() mirrors this on the canvas — see drawTileLayer. */
+/* Both re-rendered lightning styles blend as light rather than paint, so a
+   spark over heavy reflectivity brightens it instead of being lost in it. */
+.glm-blend {
+  mix-blend-mode: screen;
+}
+
+/* GLM_STYLE === "amber" only: flatten the raster to one electric colour.
+   brightness(0) keeps the alpha channel while zeroing the hue; the
+   invert/sepia/saturate chain builds the target colour back up. */
+.glm-tiles {
+  filter: brightness(0) invert(83%) sepia(72%) saturate(1200%) hue-rotate(358deg)
+    brightness(105%);
+}
+
+/* Toggle buttons share the row. Clouds and Lightning are icon-only — their
+   glyphs are self-evident and dropping the words is what lets the whole row
+   (both layers, Loop, Install, Refresh) sit on one line at phone widths.
+   Share lives in the top bar. */
 .toggles {
   gap: 8px;
+}
+/* Kept as a safety net rather than a layout: the row fits on one line at
+   375px even with Install showing, but wrapping degrades gracefully instead
+   of clipping if anything else ever joins it. Scoped to .wrap so the
+   /tropics rows are unaffected. The labelled toggle keeps the default
+   `flex: 1` (basis 0) from .btn.toggle below, so it simply absorbs whatever
+   the fixed-width glyph buttons leave — a percentage basis here would
+   reserve more than the row has and bounce Install onto a second line. */
+.toggles.wrap {
+  flex-wrap: wrap;
 }
 .btn.toggle {
   flex: 1;
@@ -299,6 +334,16 @@ button,
 }
 .btn.toggle .btn-ico {
   font-size: 16px;
+}
+/* A square glyph button, sized like Refresh/Install so the row reads evenly.
+   It must not flex — only the labelled toggle takes up the slack. */
+.btn.toggle.icon-only {
+  flex: 0 0 44px;
+  width: 44px;
+  padding: 0;
+}
+.btn.toggle.icon-only .btn-ico {
+  font-size: 18px;
 }
 /* Active/pressed toggle state. */
 .btn.toggle[aria-pressed="true"] {
@@ -353,6 +398,17 @@ button,
   flex: none;
   min-height: 44px;
   padding: 0 18px;
+}
+/* Retry-geolocation button that leads the ZIP row, sized like the other glyph
+   buttons in the panel. */
+.btn.zip-locate {
+  flex: 0 0 44px;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+}
+.btn.zip-locate .btn-ico {
+  font-size: 18px;
 }
 
 /* --- Radar loop timeline -------------------------------------------------- */

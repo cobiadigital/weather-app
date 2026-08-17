@@ -106,9 +106,21 @@
         </button>
       </div>
 
-      <!-- ZIP fallback: hidden until the "My location" button fails -->
+      <!-- ZIP fallback. Hidden until "My location" is pressed, at which point
+           it takes that button's place (see revealZip in app.js). The ◎ button
+           re-runs geolocation, so a failed attempt isn't a dead end; it also
+           stands in for a "ZIP" label, which the input's own placeholder and
+           aria-label already cover. -->
       <form id="zipForm" class="control-row zip-row hidden">
-        <label for="zipInput" class="slider-label">ZIP</label>
+        <button
+          id="zipLocateBtn"
+          class="btn zip-locate"
+          type="button"
+          aria-label="Use my location"
+          title="Use my location"
+        >
+          <span class="btn-ico" aria-hidden="true">◎</span>
+        </button>
         <input
           id="zipInput"
           class="zip-input"
@@ -125,15 +137,26 @@
       </form>
 
       <!-- Layer + mode toggles -->
-      <div class="control-row toggles">
+      <div class="control-row toggles wrap">
         <button
           id="cloudsBtn"
-          class="btn toggle"
+          class="btn toggle icon-only"
           type="button"
           aria-pressed="false"
+          aria-label="Cloud cover"
+          title="Cloud cover"
         >
           <span class="btn-ico" aria-hidden="true">☁</span>
-          <span>Clouds</span>
+        </button>
+        <button
+          id="lightningBtn"
+          class="btn toggle icon-only"
+          type="button"
+          aria-pressed="false"
+          aria-label="Lightning"
+          title="Lightning"
+        >
+          <span class="btn-ico" aria-hidden="true">⚡</span>
         </button>
         <button
           id="loopBtn"

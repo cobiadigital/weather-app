@@ -113,6 +113,56 @@
   const CLOUD_TILE_URL =
     "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png";
 
+  // GOES GLM lightning (via our Worker — see /api/glm/* in src/index.js).
+  // Flash extent density: how many flashes hit each ~10 km cell in the last
+  // 5 minutes, republished every minute. It's *total* lightning (in-cloud as
+  // well as cloud-to-ground) seen optically from orbit, so it's an overlay on
+  // top of the radar rather than a radar product of its own.
+  const GLM_PRODUCT = "fed";
+  const GLM_TILE_URL = "/api/glm/{layer}/{z}/{x}/{y}.png?t={t}";
+  const GLM_FRAMES_URL = "/api/glm/" + GLM_PRODUCT + "/frames";
+  // GLM's grid is ~10 km, so RealEarth's pyramid stops here; Leaflet upscales
+  // the z7 tile past this rather than showing nothing.
+  const GLM_MAX_NATIVE_ZOOM = 7;
+  // New frame every minute. Cheap to follow: one frames fetch plus a redraw of
+  // ~20 tiles that are 1-4 KB each.
+  const GLM_REFRESH_MS = 60 * 1000;
+  // How the lightning overlay is drawn on top of the radar. The problem all
+  // three answer: RealEarth's native flash-extent-density ramp is blue→green→
+  // red, near enough to the reflectivity ramp underneath to be confusable.
+  //   "firefly" — redrawn as points of *light*: a hot near-white core with a
+  //               warm halo, sized by how much lightning is in the cell and
+  //               blended additively. Flat paint (even a loud orange) gets
+  //               lost over the yellows and reds of heavy reflectivity, which
+  //               is exactly where the lightning is; light can't be, because
+  //               screen blending only ever brightens what's beneath it.
+  //   "amber"   — the raster flattened to one electric colour, screen-blended.
+  //   "native"  — untouched, exactly as NOAA/SSEC publish it.
+  const GLM_STYLE = "firefly";
+  // "firefly" geometry. The tile is sampled on a GLM_DOT_CELLS × GLM_DOT_CELLS
+  // grid — 32 across a 256px z7 tile is about one dot per ~10 km GLM cell, so
+  // a dot stands for a real data cell rather than an arbitrary screen texture.
+  // Radii are fractions of the cell, so the whole thing scales with the map.
+  const GLM_DOT_CELLS = 32;
+  const GLM_DOT_MIN_R = 0.1; // faintest cell that still gets a spark
+  const GLM_DOT_MAX_R = 0.34; // hottest cell's core (the halo runs wider)
+  // …but never bigger than this on screen. Without a ceiling the sparks keep
+  // growing with the map and by ~z12 they merge into one wash. Past the cap
+  // they hold size and just spread out, which is the honest picture: GLM's
+  // grid really is ~10 km no matter how far you zoom in.
+  const GLM_DOT_CAP_PX = 7;
+  // How far the glow reaches past the core. This is what makes it read as a
+  // light source rather than a filled circle.
+  const GLM_GLOW_MULT = 2.6;
+  const GLM_CORE_COLOR = "rgba(255, 253, 235, 0.98)"; // hot centre
+  const GLM_GLOW_COLOR = "255, 196, 92"; // warm falloff (rgb triplet)
+  // Must stay in step with the .glm-tiles filter in styles.css — the on-screen
+  // layer uses that one, the shared image uses this one.
+  const GLM_CANVAS_FILTER =
+    "brightness(0) invert(83%) sepia(72%) saturate(1200%) hue-rotate(358deg) brightness(105%)";
+  const GLM_ATTRIBUTION =
+    'Lightning: <a href="https://www.nesdis.noaa.gov/our-satellites/currently-flying/goes-east-west/geostationary-lightning-mapper-glm">NOAA GOES GLM</a> via <a href="https://realearth.ssec.wisc.edu/">SSEC RealEarth</a>';
+
   // MRMS (via our Worker). The tile template carries {layer} (which MRMS
   // product — see RADAR_PRODUCTS' mrmsLayer) and {t} (the frame time both the
   // live layer and the loop pin to — identical URLs => Cache Storage hits).
@@ -246,6 +296,7 @@
     alertList: document.getElementById("alertList"),
     alertClose: document.getElementById("alertClose"),
     cloudsBtn: document.getElementById("cloudsBtn"),
+    lightningBtn: document.getElementById("lightningBtn"),
     loopBtn: document.getElementById("loopBtn"),
     shareBtn: document.getElementById("shareBtn"),
     settingsBtn: document.getElementById("settingsBtn"),
@@ -272,6 +323,7 @@
     loopScrub: document.getElementById("loopScrub"),
     loopTime: document.getElementById("loopTime"),
     zipForm: document.getElementById("zipForm"),
+    zipLocateBtn: document.getElementById("zipLocateBtn"),
     zipInput: document.getElementById("zipInput"),
     zipBtn: document.getElementById("zipBtn"),
     locateRow: document.getElementById("locateRow"),
@@ -282,6 +334,8 @@
   let basemapLayer; // CARTO dark base tiles
   let radarLayer; // live radar (current frame)
   let cloudLayer; // GOES satellite cloud layer (optional)
+  let lightningLayer; // GOES GLM lightning overlay (optional)
+  let lightningTimer; // 1-minute frame follower, only while the overlay is on
   let meMarker;
   let refreshTimer;
   let lastRefreshAt = 0; // Date.now() of the last actual radar refresh
@@ -833,9 +887,13 @@
 
   // Fetch + memoize one tile source's canonical frame list
   // (Date[], oldest -> newest).
-  async function ensureFrames(src) {
+  // `maxAgeMs` overrides how stale a memoized list may be. The lightning
+  // overlay polls on the same 60s beat as the default TTL, so on the default
+  // it would coin-flip between a real fetch and the cached list and sit a
+  // frame behind; it passes 0 to always re-ask.
+  async function ensureFrames(src, maxAgeMs = MRMS_FRAMES_TTL_MS) {
     const entry = framesByKey.get(src.key);
-    if (entry && entry.frames.length && Date.now() - entry.at < MRMS_FRAMES_TTL_MS) {
+    if (entry && entry.frames.length && Date.now() - entry.at < maxAgeMs) {
       return entry.frames;
     }
     try {
@@ -1421,6 +1479,10 @@
   // stale for a while (see the visibilitychange/focus listeners in bind()).
   function refreshIfStale() {
     if (document.visibilityState !== "visible") return;
+    // Background tabs get their timers throttled, so the lightning overlay can
+    // be several frames behind on return. It's independent of the loop, hence
+    // ahead of that early return.
+    if (lightningLayer) refreshLightning();
     if (loopOn) return; // the loop drives its own frames
     if (Date.now() - lastRefreshAt >= STALE_REFRESH_MS) refreshRadar(false);
   }
@@ -1473,14 +1535,19 @@
     else map.setView(center, zoom);
   }
 
-  function locate() {
+  // `userInitiated` distinguishes a press of "My location" from the automatic
+  // attempt on first load. Only a press swaps the ZIP row in straight away —
+  // doing that automatically would take the primary button off screen before
+  // the user had touched anything. Either way a failure lands on ZIP.
+  function locate(userInitiated) {
     if (!("geolocation" in navigator)) {
       setStatus("Location isn't available — enter a ZIP code instead.", true);
-      revealZip();
+      revealZip(true);
       return;
     }
     setStatus("Finding your location…");
     els.locateBtn.disabled = true;
+    if (userInitiated) revealZip(false);
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
@@ -1501,17 +1568,22 @@
             ? "Location off. Enter a ZIP code, or enable location in Settings."
             : "Couldn't get your location — enter a ZIP code instead.";
         setStatus(msg, true);
-        revealZip();
+        revealZip(true);
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
   }
 
-  // The ZIP fallback stays hidden until geolocation fails; then we show it and
-  // focus the field so the user can type a ZIP right away.
-  function revealZip() {
+  // The ZIP fallback takes the place of the "My location" button rather than
+  // stacking under it, so the panel never grows a second location row. It's
+  // swapped in as soon as locating starts: if that succeeds both rows collapse
+  // anyway, and if it doesn't the field is already sitting there. `focus` is
+  // held back until an attempt actually fails — focusing it up front would pop
+  // the keyboard over a locate that was about to succeed.
+  function revealZip(focus) {
+    els.locateRow.classList.add("hidden");
     els.zipForm.classList.remove("hidden");
-    els.zipInput.focus();
+    if (focus) els.zipInput.focus();
   }
 
   // Once we have a location, tuck the location controls away and leave just a
@@ -1524,8 +1596,10 @@
 
   function expandLocationControls() {
     els.locateRow.classList.remove("hidden");
+    els.zipForm.classList.add("hidden");
     els.locPinBtn.classList.add("hidden");
-    // The ZIP field stays hidden; it only reappears if a locate attempt fails.
+    // Reopening always offers "My location" first; the ZIP field comes back
+    // only once that's pressed again.
   }
 
   // --- ZIP-code fallback ---------------------------------------------------
@@ -1750,6 +1824,240 @@
     }).addTo(map);
     setToggle(els.cloudsBtn, true);
     setStatus("Cloud cover (GOES satellite) on.");
+  }
+
+  // --- Lightning (GOES GLM) layer ------------------------------------------
+
+  // Flash extent density from the GOES lightning mapper, drawn *above* the
+  // radar so it isn't buried under a reflectivity wash (it marks which part of
+  // a storm is electrified, which is only useful next to the storm itself).
+  // Tiles are timestamped like the MRMS ones, but this
+  // layer deliberately skips the Cache Storage pipeline — there's no lightning
+  // loop to replay, and a frame a minute would churn the tile budget that the
+  // radar loop depends on. Immutable URLs mean the ordinary HTTP cache still
+  // does the work.
+  function toggleLightning() {
+    if (lightningLayer) {
+      stopLightning();
+      setStatus("Lightning off.");
+      return;
+    }
+    const build = GLM_STYLE === "firefly" ? glmDotTileLayer : L.tileLayer;
+    lightningLayer = build(GLM_TILE_URL, {
+      layer: GLM_PRODUCT,
+      t: "", // pinned to the newest frame by refreshLightning() below
+      // Sparks are small and additive, so they can sit at full strength; the
+      // raster styles have to stay light enough to read the radar underneath.
+      opacity: GLM_STYLE === "firefly" ? 1 : 0.6,
+      attribution: GLM_ATTRIBUTION,
+      zIndex: 6, // above the radar (zIndex 5)
+      maxZoom: 15,
+      maxNativeZoom: GLM_MAX_NATIVE_ZOOM,
+      crossOrigin: "anonymous",
+      // Both non-native styles blend as light against the map, which is a
+      // property of the layer rather than of its pixels — so it has to be set
+      // in CSS for the screen and repeated for the share canvas. "firefly"
+      // needs nothing else (its colour is baked into the canvas tiles the
+      // compositor already draws); "amber" additionally needs its recolour
+      // replayed, since a CSS filter is invisible to the canvas.
+      className:
+        GLM_STYLE === "amber"
+          ? "glm-blend glm-tiles"
+          : GLM_STYLE === "firefly"
+            ? "glm-blend"
+            : "",
+      canvasFilter: GLM_STYLE === "amber" ? GLM_CANVAS_FILTER : null,
+      canvasBlend: GLM_STYLE === "native" ? null : "screen",
+    }).addTo(map);
+    setToggle(els.lightningBtn, true);
+
+    const c = map.getCenter();
+    setStatus(
+      inConus(c.lat, c.lng)
+        ? "Lightning (GOES GLM) on."
+        : "Lightning on — GLM coverage is the lower 48 only."
+    );
+
+    // Dot geometry is computed per tile from the size it's drawn at, so a zoom
+    // that Leaflet would serve by rescaling the existing canvases has to
+    // re-render them instead — otherwise the dots stretch past their cap.
+    if (GLM_STYLE === "firefly") map.on("zoomend", redrawLightning);
+
+    refreshLightning();
+    clearInterval(lightningTimer);
+    lightningTimer = setInterval(refreshLightning, GLM_REFRESH_MS);
+  }
+
+  function stopLightning() {
+    clearInterval(lightningTimer);
+    lightningTimer = null;
+    map.off("zoomend", redrawLightning);
+    if (lightningLayer) map.removeLayer(lightningLayer);
+    lightningLayer = null;
+    setToggle(els.lightningBtn, false);
+  }
+
+  function redrawLightning() {
+    if (lightningLayer) lightningLayer.redraw();
+  }
+
+  // Repoint the overlay at the newest published frame. Same trick as the radar
+  // refresh: only options.t changes, so redraw() beats setUrl().
+  async function refreshLightning() {
+    if (!lightningLayer) return;
+    const frames = await ensureFrames(glmSource(), 0);
+    if (!lightningLayer) return; // toggled off while we were waiting
+    const newest = frames.length ? frames[frames.length - 1] : null;
+    const t = newest ? isoUTC(newest) : "";
+    if (lightningLayer.options.t === t) return; // no new frame yet
+    lightningLayer.options.t = t;
+    lightningLayer.redraw();
+  }
+
+  // Shaped like tileSource()'s result so it can share ensureFrames() and the
+  // framesByKey memo. Its own key, since GLM updates on its own schedule.
+  function glmSource() {
+    return { key: "glm_" + GLM_PRODUCT, frames: GLM_FRAMES_URL };
+  }
+
+  // --- "firefly": re-render the FED raster as graduated points of light ----
+
+  // A TileLayer whose tiles are <canvas>, not <img>: it loads RealEarth's tile
+  // and redraws it as one spark per data cell, sized by how much lightning is
+  // in that cell. Doing it here rather than in CSS is what buys the
+  // size-varies-with-intensity part — a filter or mask can only apply a fixed
+  // transform to every pixel. It also means the result is baked into the
+  // element the share compositor already draws, so screen and shared image
+  // can't diverge.
+  let GlmDotLayerClass = null;
+  function glmDotTileLayer(url, opts) {
+    if (!GlmDotLayerClass) {
+      GlmDotLayerClass = L.TileLayer.extend({
+        createTile(coords, done) {
+          const tile = document.createElement("canvas");
+          // Draw at the size the tile is actually displayed at — past
+          // maxNativeZoom that's the upscaled size — so dots stay crisp
+          // instead of being a blown-up 256px bitmap.
+          const size = this.getTileSize();
+          tile.width = size.x;
+          tile.height = size.y;
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            try {
+              drawGlmDots(tile, img);
+            } catch (_) {
+              /* leave the tile blank rather than failing the layer */
+            }
+            done(null, tile);
+          };
+          // A missing frame is normal (RealEarth serves a transparent
+          // placeholder); an empty canvas is the right answer, not an error.
+          img.onerror = () => done(null, tile);
+          img.src = this.getTileUrl(coords);
+          return tile;
+        },
+      });
+    }
+    return new GlmDotLayerClass(url, opts);
+  }
+
+  function drawGlmDots(tile, img) {
+    const S = tile.width;
+    if (!S) return;
+    // Read the source at its own resolution; sampling is done in cell space so
+    // the tile's display size doesn't change which cells we find.
+    const src = document.createElement("canvas");
+    src.width = img.naturalWidth || 256;
+    src.height = img.naturalHeight || 256;
+    const sctx = src.getContext("2d");
+    sctx.drawImage(img, 0, 0);
+    const px = sctx.getImageData(0, 0, src.width, src.height).data;
+
+    const ctx = tile.getContext("2d");
+    // Sparks add to each other, so overlapping halos build into a glowing
+    // field the way real light would, instead of flat discs overpainting.
+    ctx.globalCompositeOperation = "lighter";
+    const cell = S / GLM_DOT_CELLS; // dot pitch, tile px
+    const sCell = src.width / GLM_DOT_CELLS; // same cell, source px
+    // Size ramp for this zoom: the hottest dot fills its cell until that would
+    // exceed the screen cap, and the rest of the scale is kept proportional to
+    // it so intensity stays readable at every zoom.
+    const hotR = Math.min(cell * GLM_DOT_MAX_R, GLM_DOT_CAP_PX);
+    const minFrac = GLM_DOT_MIN_R / GLM_DOT_MAX_R;
+
+    for (let row = 0; row < GLM_DOT_CELLS; row++) {
+      for (let col = 0; col < GLM_DOT_CELLS; col++) {
+        const t = cellIntensity(
+          px,
+          src.width,
+          Math.floor(col * sCell),
+          Math.floor(row * sCell),
+          Math.max(1, Math.floor(sCell))
+        );
+        if (t <= 0) continue;
+        const core = hotR * (minFrac + t * (1 - minFrac));
+        const glow = core * GLM_GLOW_MULT;
+        const cx = (col + 0.5) * cell;
+        const cy = (row + 0.5) * cell;
+        // Core → warm halo → nothing. The halo's alpha also tracks intensity,
+        // so a weak cell is a faint pinprick and a hot one genuinely burns.
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
+        grad.addColorStop(0, GLM_CORE_COLOR);
+        grad.addColorStop(
+          Math.min(0.9, core / glow),
+          "rgba(" + GLM_GLOW_COLOR + ", " + (0.34 + 0.4 * t).toFixed(3) + ")"
+        );
+        grad.addColorStop(1, "rgba(" + GLM_GLOW_COLOR + ", 0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, glow, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Mean flash density over one cell, 0-1. RealEarth encodes the value as a
+  // colour on a blue→green→yellow→red ramp, so the hue is the reading: 240° is
+  // the bottom of the scale, 0° the top. No-data pixels don't dilute the
+  // average — a cell only half covered by a storm should read as strong as the
+  // half that's lit.
+  //
+  // What counts as data is deliberately strict: every colour on that ramp is
+  // fully saturated, so a pixel must have real chroma. Transparency alone is
+  // not a safe test — RealEarth's "no data" tile is a 1-bit PNG whose
+  // transparency lives in a tRNS chunk, and a decoder that ignores it hands us
+  // an opaque *black* tile. Reading those as mid-scale painted a full grid of
+  // identical sparks over every empty tile (i.e. lightning where there was
+  // none). Black, white and grey are never values here, so they're no-data.
+  function cellIntensity(px, w, x0, y0, span) {
+    let sum = 0;
+    let n = 0;
+    for (let y = y0; y < y0 + span; y++) {
+      for (let x = x0; x < x0 + span; x++) {
+        const i = (y * w + x) * 4;
+        // Written so an out-of-range read (undefined) fails the test too.
+        if (!(px[i + 3] > 8)) continue;
+        const r = px[i];
+        const g = px[i + 1];
+        const b = px[i + 2];
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const d = max - min;
+        if (max < 40 || d < 12) continue; // black / white / grey: not on the ramp
+        let h;
+        if (max === r) h = ((g - b) / d) % 6;
+        else if (max === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h *= 60;
+        if (h < 0) h += 360;
+        // Past the blue end the ramp wraps into magenta — that's the top.
+        const t = h > 260 ? 1 : (240 - h) / 240;
+        sum += Math.max(0, Math.min(1, t));
+        n++;
+      }
+    }
+    return n ? sum / n : 0;
   }
 
   // --- Radar loop (last 4 hours) -------------------------------------------
@@ -2278,7 +2586,7 @@
     ctx.fillRect(0, 0, size.x, size.y);
 
     // Bottom-to-top, mirroring the on-screen z-order:
-    // basemap → clouds (zIndex 4) → radar (zIndex 5).
+    // basemap → clouds (zIndex 4) → radar (zIndex 5) → lightning (zIndex 6).
     drawTileLayer(ctx, basemapLayer, zoom, origin);
     if (cloudLayer) drawTileLayer(ctx, cloudLayer, zoom, origin);
     if (loopOn && loopLayers[loopIndex]) {
@@ -2286,6 +2594,7 @@
     } else if (radarLayer && map.hasLayer(radarLayer)) {
       drawTileLayer(ctx, radarLayer, zoom, origin);
     }
+    if (lightningLayer) drawTileLayer(ctx, lightningLayer, zoom, origin);
 
     if (meMarker) {
       const p = map.latLngToContainerPoint(meMarker.getLatLng());
@@ -2311,23 +2620,42 @@
     const T = 256; // Leaflet's default tile size
     const op = layer.options.opacity == null ? 1 : layer.options.opacity;
     if (op <= 0) return;
+
+    // A layer with maxNativeZoom (the GLM overlay) keeps serving its deepest
+    // real tiles past that zoom and lets the map scale them up, so its tile
+    // coords aren't the map's zoom. Draw at whatever zoom the layer is
+    // actually rendering, scaled to match. For every other layer _tileZoom is
+    // the map zoom and this collapses to size = 256.
+    const tz = layer._tileZoom == null ? zoom : layer._tileZoom;
+    const size = T * Math.pow(2, zoom - tz);
     ctx.globalAlpha = op;
+    // Match whatever CSS is doing to this layer on screen (the lightning
+    // overlay is recoloured and screen-blended). Browsers without ctx.filter
+    // just export the layer's own colours — a duller share, not a broken one.
+    if (layer.options.canvasFilter && "filter" in ctx) {
+      ctx.filter = layer.options.canvasFilter;
+    }
+    if (layer.options.canvasBlend) {
+      ctx.globalCompositeOperation = layer.options.canvasBlend;
+    }
     for (const key in tiles) {
       const tile = tiles[key];
       if (!tile.current || !tile.loaded || !tile.el) continue;
-      if (!tile.coords || tile.coords.z !== zoom) continue;
+      if (!tile.coords || tile.coords.z !== tz) continue;
       const el = tile.el;
       // Skip broken/undecoded images — drawImage would throw on them.
       if (el.tagName === "IMG" && !el.naturalWidth) continue;
-      const x = tile.coords.x * T - origin.x;
-      const y = tile.coords.y * T - origin.y;
+      const x = tile.coords.x * size - origin.x;
+      const y = tile.coords.y * size - origin.y;
       try {
-        ctx.drawImage(el, x, y, T, T);
+        ctx.drawImage(el, x, y, size, size);
       } catch (_) {
         /* one bad tile shouldn't sink the whole capture */
       }
     }
     ctx.globalAlpha = 1;
+    if ("filter" in ctx) ctx.filter = "none";
+    ctx.globalCompositeOperation = "source-over";
   }
 
   // The location marker, matching the CSS .me-marker (accent dot, white ring,
@@ -2350,7 +2678,29 @@
   // Branding + timestamp + source attribution along the bottom edge. Two rows
   // (title/time, then attribution) so nothing collides on a narrow phone width.
   function drawCaption(ctx, size) {
-    const barH = 52;
+    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
+    const x = 12;
+
+    // Credit every source that's actually in the frame. With the lightning
+    // overlay on, that's one line too many for a 390px phone, so it breaks in
+    // two and the bar grows — nobody's attribution gets clipped off the edge.
+    ctx.font = "400 10px " + font;
+    const credits = ["Radar: NWS NEXRAD / IEM"];
+    if (lightningLayer) credits.push("Lightning: GOES GLM / SSEC RealEarth");
+    credits.push("© OpenStreetMap, © CARTO");
+    const sep = "  ·  ";
+    const creditLines = [];
+    for (const part of credits) {
+      const last = creditLines.length - 1;
+      const merged = last < 0 ? part : creditLines[last] + sep + part;
+      if (last >= 0 && ctx.measureText(merged).width <= size.x - x * 2) {
+        creditLines[last] = merged;
+      } else {
+        creditLines.push(part);
+      }
+    }
+
+    const barH = 52 + (creditLines.length - 1) * 13;
     const top = size.y - barH;
     const grad = ctx.createLinearGradient(0, top - 14, 0, size.y);
     grad.addColorStop(0, "rgba(11, 18, 32, 0)");
@@ -2358,8 +2708,6 @@
     ctx.fillStyle = grad;
     ctx.fillRect(0, top - 14, size.x, barH + 14);
 
-    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
-    const x = 12;
     ctx.textBaseline = "alphabetic";
     ctx.textAlign = "left";
 
@@ -2372,14 +2720,12 @@
     ctx.font = "400 13px " + font;
     ctx.fillText("  ·  " + captionStamp(), x + brandW, top + 22);
 
-    // Row 2: source attribution (OSM/CARTO/IEM licensing).
+    // Row 2 (and 3, with lightning on): source attribution.
     ctx.fillStyle = "rgba(219, 232, 255, 0.5)";
     ctx.font = "400 10px " + font;
-    ctx.fillText(
-      "Radar: NWS NEXRAD / IEM  ·  © OpenStreetMap, © CARTO",
-      x,
-      top + 42
-    );
+    creditLines.forEach((line, i) => {
+      ctx.fillText(line, x, top + 42 + i * 13);
+    });
   }
 
   function captionStamp() {
@@ -2444,12 +2790,13 @@
   // --- Wire up -------------------------------------------------------------
 
   function bind() {
-    els.locateBtn.addEventListener("click", locate);
+    els.locateBtn.addEventListener("click", () => locate(true));
     els.refreshBtn.addEventListener("click", () => refreshRadar(true));
     els.opacity.addEventListener("input", onOpacity);
     els.alertPill.addEventListener("click", openSheet);
     els.alertClose.addEventListener("click", closeSheet);
     els.cloudsBtn.addEventListener("click", toggleClouds);
+    els.lightningBtn.addEventListener("click", toggleLightning);
     els.loopBtn.addEventListener("click", toggleLoop);
     els.shareBtn.addEventListener("click", shareView);
     els.settingsBtn.addEventListener("click", toggleSettingsSheet);
@@ -2494,6 +2841,8 @@
       goToZip();
     });
     els.locPinBtn.addEventListener("click", expandLocationControls);
+    // Retry geolocation from inside the ZIP row (it replaced the locate button).
+    els.zipLocateBtn.addEventListener("click", () => locate(true));
     els.playBtn.addEventListener("click", togglePlay);
     els.loopScrub.addEventListener("input", onScrub);
     els.installBtn.addEventListener("click", onInstall);
@@ -2532,8 +2881,11 @@
     initMap();
     bind();
     // Auto-request location on first load if we don't have a saved spot;
-    // otherwise we already have a location, so collapse the controls.
-    if (!loadLocation()) locate();
+    // otherwise we already have a location, so collapse the controls. Passing
+    // false keeps "My location" on screen during this automatic attempt — the
+    // ZIP row only takes its place once the user presses it themselves (or the
+    // attempt fails and the fallback is genuinely needed).
+    if (!loadLocation()) locate(false);
     else collapseLocationControls();
   });
 })();
