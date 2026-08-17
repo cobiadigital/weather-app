@@ -36,7 +36,9 @@ All data is public and comes from **NOAA / the National Weather Service**:
   top bar (tap it to re-center or change location)
 - **ZIP-code fallback** for when location services are off — a tiny offline
   lookup table (`public/zip3.json`) maps the ZIP's 3-digit prefix to a lat/lon
-  and recenters the map. It stays hidden until a locate attempt fails
+  and recenters the map. It stays hidden until you press **My location**, then
+  takes that button's place rather than adding a row — with a ◎ button to retry
+  geolocation if you'd rather not type
 - Radar **opacity slider** and manual **refresh**; radar auto-refreshes every 5 min
 - **Loop 2h** — animate the last 2 hours of radar with a play/pause + scrubber
   and a timestamp. On the MRMS default, frames you've already viewed replay

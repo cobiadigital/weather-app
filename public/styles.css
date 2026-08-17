@@ -399,6 +399,17 @@ button,
   min-height: 44px;
   padding: 0 18px;
 }
+/* Retry-geolocation button that leads the ZIP row, sized like the other glyph
+   buttons in the panel. */
+.btn.zip-locate {
+  flex: 0 0 44px;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+}
+.btn.zip-locate .btn-ico {
+  font-size: 18px;
+}
 
 /* --- Radar loop timeline -------------------------------------------------- */
 

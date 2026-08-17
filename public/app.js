@@ -323,6 +323,7 @@
     loopScrub: document.getElementById("loopScrub"),
     loopTime: document.getElementById("loopTime"),
     zipForm: document.getElementById("zipForm"),
+    zipLocateBtn: document.getElementById("zipLocateBtn"),
     zipInput: document.getElementById("zipInput"),
     zipBtn: document.getElementById("zipBtn"),
     locateRow: document.getElementById("locateRow"),
@@ -1534,14 +1535,19 @@
     else map.setView(center, zoom);
   }
 
-  function locate() {
+  // `userInitiated` distinguishes a press of "My location" from the automatic
+  // attempt on first load. Only a press swaps the ZIP row in straight away —
+  // doing that automatically would take the primary button off screen before
+  // the user had touched anything. Either way a failure lands on ZIP.
+  function locate(userInitiated) {
     if (!("geolocation" in navigator)) {
       setStatus("Location isn't available — enter a ZIP code instead.", true);
-      revealZip();
+      revealZip(true);
       return;
     }
     setStatus("Finding your location…");
     els.locateBtn.disabled = true;
+    if (userInitiated) revealZip(false);
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
@@ -1562,17 +1568,22 @@
             ? "Location off. Enter a ZIP code, or enable location in Settings."
             : "Couldn't get your location — enter a ZIP code instead.";
         setStatus(msg, true);
-        revealZip();
+        revealZip(true);
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
   }
 
-  // The ZIP fallback stays hidden until geolocation fails; then we show it and
-  // focus the field so the user can type a ZIP right away.
-  function revealZip() {
+  // The ZIP fallback takes the place of the "My location" button rather than
+  // stacking under it, so the panel never grows a second location row. It's
+  // swapped in as soon as locating starts: if that succeeds both rows collapse
+  // anyway, and if it doesn't the field is already sitting there. `focus` is
+  // held back until an attempt actually fails — focusing it up front would pop
+  // the keyboard over a locate that was about to succeed.
+  function revealZip(focus) {
+    els.locateRow.classList.add("hidden");
     els.zipForm.classList.remove("hidden");
-    els.zipInput.focus();
+    if (focus) els.zipInput.focus();
   }
 
   // Once we have a location, tuck the location controls away and leave just a
@@ -1585,8 +1596,10 @@
 
   function expandLocationControls() {
     els.locateRow.classList.remove("hidden");
+    els.zipForm.classList.add("hidden");
     els.locPinBtn.classList.add("hidden");
-    // The ZIP field stays hidden; it only reappears if a locate attempt fails.
+    // Reopening always offers "My location" first; the ZIP field comes back
+    // only once that's pressed again.
   }
 
   // --- ZIP-code fallback ---------------------------------------------------
@@ -2777,7 +2790,7 @@
   // --- Wire up -------------------------------------------------------------
 
   function bind() {
-    els.locateBtn.addEventListener("click", locate);
+    els.locateBtn.addEventListener("click", () => locate(true));
     els.refreshBtn.addEventListener("click", () => refreshRadar(true));
     els.opacity.addEventListener("input", onOpacity);
     els.alertPill.addEventListener("click", openSheet);
@@ -2828,6 +2841,8 @@
       goToZip();
     });
     els.locPinBtn.addEventListener("click", expandLocationControls);
+    // Retry geolocation from inside the ZIP row (it replaced the locate button).
+    els.zipLocateBtn.addEventListener("click", () => locate(true));
     els.playBtn.addEventListener("click", togglePlay);
     els.loopScrub.addEventListener("input", onScrub);
     els.installBtn.addEventListener("click", onInstall);
@@ -2866,8 +2881,11 @@
     initMap();
     bind();
     // Auto-request location on first load if we don't have a saved spot;
-    // otherwise we already have a location, so collapse the controls.
-    if (!loadLocation()) locate();
+    // otherwise we already have a location, so collapse the controls. Passing
+    // false keeps "My location" on screen during this automatic attempt — the
+    // ZIP row only takes its place once the user presses it themselves (or the
+    // attempt fails and the fallback is genuinely needed).
+    if (!loadLocation()) locate(false);
     else collapseLocationControls();
   });
 })();
