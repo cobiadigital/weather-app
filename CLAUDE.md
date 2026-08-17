@@ -309,6 +309,13 @@ Concretely, before you consider any UI change done:
   choice.
 - **Text controls get real padding and ≥14px type.** 12px labels crammed into a
   pill are unreadable at arm's length in daylight.
+- **The layer toggles in `<footer class="controls">` are icon-only by design.**
+  Clouds and Lightning are 44px square glyphs (`.btn.toggle.icon-only`) with an
+  `aria-label` carrying the name; dropping the words is what lets both layers,
+  Loop, Install and Refresh share one line down to 375px. Don't re-add the
+  labels, and keep the one labelled toggle on `flex: 1` (basis 0) — giving it a
+  percentage basis reserves more than the row has and bounces Install onto a
+  second line.
 - **Don't crowd a row.** A message plus two buttons on one line collapses badly
   at 390px. Stack, wrap, or give the actions their own full-width row.
 - **Respect the safe-area insets** (`env(safe-area-inset-*)`), the `100dvh`

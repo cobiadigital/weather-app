@@ -309,21 +309,22 @@ button,
     brightness(105%);
 }
 
-/* Toggle buttons (Clouds / Lightning / Loop) share the row evenly.
-   Install is icon-only next to Refresh. Share lives in the top bar. */
+/* Toggle buttons share the row. Clouds and Lightning are icon-only — their
+   glyphs are self-evident and dropping the words is what lets the whole row
+   (both layers, Loop, Install, Refresh) sit on one line at phone widths.
+   Share lives in the top bar. */
 .toggles {
   gap: 8px;
 }
-/* Three text toggles plus Refresh don't fit one 390px row — they squeeze the
-   labels onto two lines and push Refresh against the panel edge. Wrapping
-   gives each a full-width-ish target instead: at phone widths this lands as
-   [Clouds][Lightning] / [Loop 2h][↻], and on wider screens it stays one row.
-   Scoped to .wrap so the /tropics rows (which do fit) are unaffected. */
+/* Kept as a safety net rather than a layout: the row fits on one line at
+   375px even with Install showing, but wrapping degrades gracefully instead
+   of clipping if anything else ever joins it. Scoped to .wrap so the
+   /tropics rows are unaffected. The labelled toggle keeps the default
+   `flex: 1` (basis 0) from .btn.toggle below, so it simply absorbs whatever
+   the fixed-width glyph buttons leave — a percentage basis here would
+   reserve more than the row has and bounce Install onto a second line. */
 .toggles.wrap {
   flex-wrap: wrap;
-}
-.toggles.wrap .btn.toggle {
-  flex: 1 1 40%;
 }
 .btn.toggle {
   flex: 1;
@@ -333,6 +334,16 @@ button,
 }
 .btn.toggle .btn-ico {
   font-size: 16px;
+}
+/* A square glyph button, sized like Refresh/Install so the row reads evenly.
+   It must not flex — only the labelled toggle takes up the slack. */
+.btn.toggle.icon-only {
+  flex: 0 0 44px;
+  width: 44px;
+  padding: 0;
+}
+.btn.toggle.icon-only .btn-ico {
+  font-size: 18px;
 }
 /* Active/pressed toggle state. */
 .btn.toggle[aria-pressed="true"] {
