@@ -290,10 +290,11 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
   still read the basemap off a canvas.
 
   Two failure modes worth knowing: **no key** degrades to a watermarked tile
-  rather than a blank map, cached only 60s so setting the key takes effect at
-  once; a **wrong** key is indistinguishable from no key (CARTO serves the
-  watermark, not an error) but *is* cached for a week — so purge the Cloudflare
-  cache after setting or rotating the key. CARTO is also steering raster PNG
+  rather than a blank map, cached only 60s — so setting the key for the first
+  time needs no cache purge, the unkeyed entries age out by themselves. A
+  **wrong** key is indistinguishable from no key (CARTO serves the watermark,
+  not an error) but *is* cached for a week, so fixing one — or rotating a good
+  key — does want a purge. CARTO is also steering raster PNG
   basemaps toward retirement in favour of vector; if that lands, the keyless
   fallbacks worth looking at are Esri's `World_Dark_Gray_Base`
   (`services.arcgisonline.com`, open CORS, needs a separate

@@ -200,7 +200,17 @@ edge, so real traffic costs a tiny fraction of the 5M allowance. Notes:
 - **Nothing breaks without the key.** The Worker still serves tiles, they're
   just watermarked, and they're cached for only 60s so the watermark clears as
   soon as the key is set.
-- A *wrong* key looks identical to no key — CARTO serves the watermark rather
-  than an error — so after setting or rotating the key, purge the cache
-  (**Caching → Configuration → Purge Everything**) rather than waiting out the
-  week-long TTL, and reload to confirm the watermark is gone.
+- **Setting the key the first time needs no cache purge.** The unkeyed tiles
+  already at the edge carry a 60s TTL, so they age out on their own a minute
+  or two after the secret lands.
+- **Rotating the key, or fixing a wrong one, does.** A wrong key is
+  indistinguishable from no key — CARTO serves the watermark rather than an
+  error — so those responses get cached for the full week. Purge (**Caching →
+  Configuration → Purge Everything**) rather than waiting out the TTL.
+- To check whether a key took, fetch a tile and look at its size: z5/8/12 is
+  7805 bytes when watermarked.
+
+  ```sh
+  curl -s -o /dev/null -w "%{size_download}\n" \
+    https://bendar.app/api/basemap/dark/5/8/12.png
+  ```
