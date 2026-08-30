@@ -107,6 +107,20 @@ const GLM_PRODUCTS = Object.assign(Object.create(null), {
 // a long list is dead weight on cellular. Trim to a couple of hours.
 const GLM_WINDOW_MS = 2 * 60 * 60 * 1000;
 
+// Basemap tiles (CARTO). As of August 2026 CARTO stamps "API KEY REQUIRED"
+// across every tile fetched without a key, so the basemap goes through the
+// Worker rather than straight from the browser: the key lives in the
+// CARTO_API_KEY secret instead of in public JS, and the edge cache means one
+// upstream fetch serves the tile to everyone (their free tier is 5M tile
+// requests/month). Attribution still has to stay on the map — see app.js.
+const CARTO_BASEMAPS = "https://basemaps.cartocdn.com/";
+// Allowlist keyed by the path segment the client asks for (/api/basemap/<key>/…);
+// values are CARTO style names. Object.create(null) so inherited names can't
+// masquerade as styles (as with MRMS_LAYERS).
+const BASEMAP_STYLES = Object.assign(Object.create(null), {
+  dark: "dark_all",
+});
+
 // Half-width of the web-mercator (EPSG:3857) world square, in metres.
 const WEB_MERCATOR_MAX = 20037508.342789244;
 
@@ -151,6 +165,10 @@ export default {
 
     if (pathname.startsWith("/api/legend/")) {
       return handleLegend(request, url);
+    }
+
+    if (pathname.startsWith("/api/basemap/")) {
+      return handleBasemap(request, url, env);
     }
 
     // Anything else that reaches the Worker (i.e. not a static asset) is a 404.
@@ -750,6 +768,69 @@ async function handleLegend(request, url) {
   headers.set("access-control-allow-origin", "*");
   // A product's colour ramp doesn't change; cache it for a week.
   headers.set("cache-control", "public, max-age=604800, immutable");
+  return new Response(body, { status: 200, headers });
+}
+
+// ---------------------------------------------------------------------------
+// Basemap tiles (/api/basemap/*) — CARTO raster tiles with the key attached.
+// ---------------------------------------------------------------------------
+
+// One basemap tile: /api/basemap/{style}/{z}/{x}/{y}.png (or {y}@2x.png for
+// retina). `style` is checked against BASEMAP_STYLES before it reaches the
+// upstream URL, and z/x/y are parsed integers, so nothing user-supplied is
+// interpolated as text.
+//
+// Without CARTO_API_KEY set the request still goes through — CARTO answers with
+// a watermarked tile, which is a readable map and better than a blank one — but
+// it's cached for a minute rather than a week, so adding the key later takes
+// effect immediately instead of being masked by stale edge entries. A *wrong*
+// key behaves the same way (CARTO serves the watermark, not an error), which is
+// why the keyed TTL is a week and not "immutable": setting or rotating the key
+// wants a cache purge, and a week bounds the damage if that's forgotten.
+async function handleBasemap(request, url, env) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  const m = url.pathname
+    .slice("/api/basemap/".length)
+    .match(/^([a-z_]{3,20})\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})(@2x)?\.png$/);
+  if (!m || !BASEMAP_STYLES[m[1]]) return json({ error: "Not found" }, 404);
+
+  const style = BASEMAP_STYLES[m[1]];
+  const z = parseInt(m[2], 10);
+  const x = parseInt(m[3], 10);
+  const y = parseInt(m[4], 10);
+  const scale = m[5] || "";
+  const dim = Math.pow(2, z);
+  if (z > 20 || x >= dim || y >= dim) {
+    return new Response("Bad tile", { status: 400 });
+  }
+
+  const key = (env && env.CARTO_API_KEY) || "";
+  const target =
+    `${CARTO_BASEMAPS}${style}/${z}/${x}/${y}${scale}.png` +
+    (key ? "?key=" + encodeURIComponent(key) : "");
+
+  let upstream;
+  try {
+    upstream = await fetch(target, {
+      headers: { "User-Agent": USER_AGENT },
+      cf: { cacheTtl: key ? 604800 : 60, cacheEverything: true },
+    });
+  } catch (_) {
+    return new Response("Upstream error", { status: 502 });
+  }
+  if (!upstream.ok) return new Response("Upstream error", { status: 502 });
+
+  const body = await upstream.arrayBuffer();
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") || "image/png");
+  headers.set("access-control-allow-origin", "*");
+  headers.set(
+    "cache-control",
+    key ? "public, max-age=604800" : "public, max-age=60"
+  );
   return new Response(body, { status: 200, headers });
 }
 
