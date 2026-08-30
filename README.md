@@ -138,26 +138,29 @@ Since Wrangler isn't required to deploy:
 
 Your app will be available at `https://weather-app.<your-subdomain>.workers.dev`.
 
-### Branch previews
+### Pull-request previews
 
 `wrangler.toml` sets `preview_urls = true`, so with **non-production branch
-builds** enabled (Settings → Build → Branch control) every pull request gets a
-shareable URL:
+builds** enabled (Settings → Build → Branch control) the Cloudflare GitHub app
+posts a **Commit Preview URL** to each pull request, roughly two minutes after
+a push:
 
 ```
-https://<branch-name>-weather-app.<your-subdomain>.workers.dev   stable per branch
-https://<version-id>-weather-app.<your-subdomain>.workers.dev    pinned to one build
+https://<version-prefix>-weather-app.<your-subdomain>.workers.dev
 ```
 
-`<branch-name>` is sanitised for DNS — `/` becomes `-`, so
-`claude/my-feature` → `claude-my-feature-weather-app.…`. The Cloudflare GitHub
-app posts both links as a pull-request comment.
+`<version-prefix>` is the first block of the Worker's version UUID — assigned by
+Cloudflare, not derived from the git SHA or the branch name. **Read it from the
+PR comment; it can't be constructed.** It also changes with every push, so
+re-read the comment rather than reusing an old link.
 
-> **Set the non-production deploy command to `npx wrangler versions upload`.**
-> The default `npx wrangler deploy` publishes to **production** from whatever
-> branch it builds — so with non-production builds enabled, pushing any branch
-> would overwrite the live site. `versions upload` uploads a version (giving it
-> a preview URL) without promoting it to production.
+> **Branch aliases don't work here, as of Aug 2026.** Cloudflare's docs and the
+> 2025-07-23 changelog describe a second, stable
+> `<branch-name>-<worker>.<subdomain>.workers.dev` alias created automatically
+> when a PR is opened. Observed behaviour on this project is that only the
+> commit URL is issued — the branch alias 404s, and the PR comment contains no
+> Branch Preview URL entry. Don't burn time chasing it; use the commit URL from
+> the comment.
 
 ## Local development (optional)
 

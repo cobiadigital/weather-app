@@ -347,18 +347,33 @@ Deploy is via the Cloudflare dashboard's Git integration (Workers & Pages →
 Connect to Git). Every commit to the production branch redeploys. No local
 Wrangler is required. See `README.md` for the step-by-step.
 
-**Branch previews.** `wrangler.toml` sets `preview_urls = true` and
-non-production branch builds are enabled, so each branch gets
-`https://<branch-name>-weather-app.cobiadigital.workers.dev` (`/` in the branch
-name becomes `-`) plus a per-version URL, both posted to the PR by the
-Cloudflare GitHub app. The branch URL is stable across commits; the version one
-changes every build, so prefer the branch URL when sharing.
+**PR previews.** `wrangler.toml` sets `preview_urls = true` and non-production
+branch builds are enabled, so the Cloudflare GitHub app posts a **Commit
+Preview URL** (`https://<version-prefix>-weather-app.cobiadigital.workers.dev`)
+to each PR about two minutes after a push.
 
-⚠️ A preview URL only keeps a branch **off production** if the Workers Builds
-non-production deploy command is `npx wrangler versions upload`. The default
-`npx wrangler deploy` publishes to production from whatever branch it builds —
-with non-production builds on, that means any branch push overwrites
-bendar.app. Check this setting before assuming a branch is safely sandboxed.
+To hand someone that URL, **read it from the PR comment** — e.g. the GitHub MCP
+`pull_request_read` with `method: get_comments`. The version prefix is the first
+block of a Cloudflare-assigned version UUID: it is *not* derived from the git
+SHA or the branch name, so it cannot be constructed, and it changes on every
+push.
+
+⚠️ **Branch aliases do not work here (verified Aug 2026).** Cloudflare's docs
+and the 2025-07-23 changelog promise a second, stable
+`<branch-name>-<worker>.<subdomain>.workers.dev` alias, "automatically created,
+no configuration needed", when a PR is opened. Observed behaviour contradicts
+that: the alias 404s and the PR comment has no Branch Preview URL entry — only
+the commit one. Treat the published docs as aspirational here and don't spend
+time debugging the alias.
+
+Two traps that cost real time when diagnosing this:
+
+- The Worker's `modified_on` moves for a *version upload* too, not just a
+  production deploy, so a fresh timestamp after a branch push proves nothing
+  about whether the branch went live.
+- If the branch has been merged, production legitimately serves that code —
+  check `git merge-base --is-ancestor <sha> origin/main` before concluding a
+  branch deployed itself.
 
 ## Local dev (optional)
 
