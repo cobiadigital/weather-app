@@ -475,16 +475,16 @@
     // crossOrigin lets us later read these tiles back off a <canvas> for the
     // "Share as image" feature without tainting it (all sources send CORS
     // headers). See shareView().
-    basemapLayer = L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-      {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        subdomains: "abcd",
-        maxZoom: 19,
-        crossOrigin: "anonymous",
-      }
-    ).addTo(map);
+    // Basemap tiles come through the Worker (/api/basemap/*), not straight from
+    // CARTO: CARTO now watermarks keyless tiles, and the key belongs in a
+    // Worker secret rather than in this file. Same-origin, so no subdomain
+    // sharding — HTTP/2 multiplexes and the edge cache does the rest.
+    basemapLayer = L.tileLayer("/api/basemap/dark/{z}/{x}/{y}{r}.png", {
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      maxZoom: 19,
+      crossOrigin: "anonymous",
+    }).addTo(map);
 
     radarLayer = buildRadarLayer().addTo(map);
     displayedProductId = effectiveProductId();

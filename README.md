@@ -109,7 +109,8 @@ All data is public and comes from **NOAA / the National Weather Service**:
 wrangler.toml      Worker + static-assets config
 src/index.js       Worker: /api/nws/* (NWS), /api/nhc/* (hurricanes),
                    /api/mrms/* + /api/site/* (radar tiles), /api/glm/*
-                   (lightning tiles), /api/legend/*
+                   (lightning tiles), /api/legend/*, /api/basemap/*
+                   (CARTO basemap tiles)
 public/            Static front-end (served automatically at the edge)
   index.html       main radar page
   styles.css
@@ -173,5 +174,33 @@ npm run deploy   # wrangler deploy
 
 - If you fork this, update the `USER_AGENT` contact string in `src/index.js` —
   the NWS asks API clients to identify themselves.
-- The map base layer is CARTO dark tiles; swap the `L.tileLayer(...)` URL in
-  `public/app.js` for a different style if you prefer.
+- The map base layer is CARTO dark tiles, served through the Worker at
+  `/api/basemap/dark/{z}/{x}/{y}.png` so the API key stays server-side. To use
+  a different CARTO style, add it to `BASEMAP_STYLES` in `src/index.js` and
+  change the path in `public/app.js` / `public/tropics.js`; for a different
+  provider entirely, swap the `L.tileLayer(...)` URL in both files.
+
+### The CARTO basemap API key
+
+CARTO now stamps **"API KEY REQUIRED"** across every basemap tile fetched
+without a key. Their free tier covers 5M tile requests per calendar month
+(non-commercial use) and the key is free — request one at
+<https://carto.com/basemaps/apikey/>, giving the domain you serve from.
+
+Set it as a **secret** (not a plain variable) so it isn't readable in the
+dashboard or in the repo:
+
+- Dashboard: **Workers & Pages → weather-app → Settings → Variables and Secrets
+  → Add → Secret**, name `CARTO_API_KEY`.
+- Or locally: `npx wrangler secret put CARTO_API_KEY`.
+
+The Worker attaches the key upstream and caches each tile for a week at the
+edge, so real traffic costs a tiny fraction of the 5M allowance. Notes:
+
+- **Nothing breaks without the key.** The Worker still serves tiles, they're
+  just watermarked, and they're cached for only 60s so the watermark clears as
+  soon as the key is set.
+- A *wrong* key looks identical to no key — CARTO serves the watermark rather
+  than an error — so after setting or rotating the key, purge the cache
+  (**Caching → Configuration → Purge Everything**) rather than waiting out the
+  week-long TTL, and reload to confirm the watermark is gone.

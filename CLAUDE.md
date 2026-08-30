@@ -25,7 +25,8 @@ Assets**. All data is public and comes from NOAA / the NWS.
 - **`src/index.js`** — the Worker. It handles `/api/nws/*` (proxying
   `https://api.weather.gov`), `/api/nhc/*` (the National Hurricane Center),
   `/api/mrms/*` + `/api/site/*` (re-tiling NCEP's MRMS mosaic and single-radar
-  WMS — see below), `/api/glm/*` (GOES lightning tiles) and `/api/legend/*`, so
+  WMS — see below), `/api/glm/*` (GOES lightning tiles), `/api/legend/*` and
+  `/api/basemap/*` (CARTO basemap tiles, keyed — see below), so
   it can set the `User-Agent` those services require (browsers can't set that
   header), re-tile where needed, and cache responses at the edge.
 - **`wrangler.toml`** — binds `public/` as static assets and points `main` at
@@ -273,6 +274,32 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
       has not issued a product)
     Toggles default off. The Worker does not proxy these; Leaflet
     `imageOverlay` hits MapServer directly (images don't need CORS).
+- **Basemap (CARTO, keyed via the Worker)** — the dark basemap under
+  everything, on both `/` and `/tropics`. As of **August 2026 CARTO watermarks
+  every tile fetched without an API key** ("API KEY REQUIRED" stamped across
+  the image), so the browser no longer talks to `basemaps.cartocdn.com`
+  directly. `GET /api/basemap/{style}/{z}/{x}/{y}[@2x].png` proxies
+  `https://basemaps.cartocdn.com/<style>/…` with `?key=` from the
+  **`CARTO_API_KEY` Worker secret**, so the key never ships in `app.js` where
+  anyone could lift it. `{style}` is checked against the `BASEMAP_STYLES`
+  allowlist (`dark` → `dark_all`) and z/x/y are parsed integers, so only values
+  the Worker generated reach the upstream URL. The free tier is 5M tile
+  requests/month; a week-long edge cache means real traffic never approaches
+  it. Because it's now same-origin, the `{s}` subdomain sharding is gone (HTTP/2
+  multiplexes) — `crossOrigin: "anonymous"` stays so the share compositor can
+  still read the basemap off a canvas.
+
+  Two failure modes worth knowing: **no key** degrades to a watermarked tile
+  rather than a blank map, cached only 60s so setting the key takes effect at
+  once; a **wrong** key is indistinguishable from no key (CARTO serves the
+  watermark, not an error) but *is* cached for a week — so purge the Cloudflare
+  cache after setting or rotating the key. CARTO is also steering raster PNG
+  basemaps toward retirement in favour of vector; if that lands, the keyless
+  fallbacks worth looking at are Esri's `World_Dark_Gray_Base`
+  (`services.arcgisonline.com`, open CORS, needs a separate
+  `World_Dark_Gray_Reference` label layer, maxZoom 16) or vector tiles from
+  OpenFreeMap/Protomaps (no key, but needs MapLibre in place of Leaflet's
+  raster layer).
 - **ZIP centroids (location fallback)** — `public/zip3.json`, a static
   `{ "zip3": [lat, lon] }` table keyed by **3-digit ZIP prefix** (~900
   sectional-center centroids, 2-decimal coords, ~18 KB). `app.js` fetches it
@@ -339,7 +366,9 @@ Concretely, before you consider any UI change done:
   registry via `npm pack leaflet@<ver>` and hash `dist/` with
   `openssl dgst -sha256 -binary | openssl base64`).
 - If the app is forked, update the `USER_AGENT` contact string in
-  `src/index.js` — the NWS asks clients to identify themselves.
+  `src/index.js` — the NWS asks clients to identify themselves, and get your
+  own free CARTO basemap key (<https://carto.com/basemaps/apikey/>) for the
+  `CARTO_API_KEY` secret.
 
 ## Deploying
 
