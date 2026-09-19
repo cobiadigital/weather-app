@@ -113,6 +113,42 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
   backstop that only ever tightens the target. Sweeps run on prime, refresh,
   product switch, and after the final loop wave lands (the biggest allocator).
 
+  **Upstream outage fallback.** NCEP's GeoServer does go down, and it fails in
+  a way that's invisible from the data: in Sept 2026 every `GetMap` returned
+  502/503 for over a day (taking all 4 mosaics *and* all 201 sites with it)
+  while `GetCapabilities`, cached by the Akamai edge in front of
+  `opengeo.ncep.noaa.gov`, kept serving a well-formed 60-entry frame list from
+  two days earlier. A parseable frame list plus a renderer that won't render is
+  the worst case: the app pins `?t=` to a stale instant and paints nothing,
+  which on screen is identical to clear skies. So a source's health is judged
+  two ways, and either one substitutes the IEM product via the same
+  `MRMS_FALLBACK` path as the off-CONUS case:
+  - **Stale frames** — `framesFresh()` rejects a list whose newest frame is
+    older than `SOURCE_STALE_MS` (the loop window, 2 h: past that there's no
+    data anywhere in the loop). This also subsumes the old "site frame list is
+    empty" test, so an offline radar and a stalled upstream share one check.
+  - **Failing tiles** — `watchSourceHealth()` counts `tileerror` against
+    `tileload` on the live layer and calls the source down at
+    `TILE_ERROR_LIMIT` failures *outnumbering* successes. Don't "simplify" this
+    to "nothing loaded at all": during the outage Cloudflare kept serving a
+    handful of low-zoom tiles cached from before it, so a few always landed
+    while every tile at the user's actual zoom failed.
+
+  Mosaics record the outage in `sourceOutage` (layer key -> earliest re-probe
+  time); sites keep using `siteOutage`, which already owned that case and its
+  wording. `effectiveProductId()` now *cascades* — a dead site falls to the
+  mosaic and, if that's dead too, on to IEM — rather than returning early at
+  the site check, since one GeoServer outage usually takes out both. An entry
+  never lapses back to healthy on a timer: `probeSourceRecovery()` re-fetches
+  the selected product's own frame list (it must read `selectedProduct()`, not
+  `currentProduct()` — under a substitution the failing source is no longer on
+  screen, so nothing else in the refresh path asks about it again) and only
+  evidence of fresh frames clears the mark. It runs on the 5-minute refresh
+  beat, and skips the `SOURCE_RETRY_MS` cooldown when the user taps Refresh or
+  picks a product, both of which are explicit "try again". The substitution is
+  announced in the status line next to the other two ("MRMS radar is
+  unavailable — showing …"), and the user's saved choice is never touched.
+
   All 4 MRMS layers cover the **lower 48 only**. When the map is centered
   outside CONUS (Alaska, Hawaii, Puerto Rico, …), each MRMS-backed product
   silently falls back to the product it replaced: `MRMS_FALLBACK` maps
