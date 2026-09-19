@@ -271,6 +271,26 @@
   const LOOP_SAFETY_MS = 25000; // play the coarse wave even if a frame stalls
   // Keep cached tiles a little past the loop window, then evict.
   const MRMS_CACHE_WINDOW_MS = (LOOP_HOURS * 60 + 20) * 60 * 1000;
+  // A tile source counts as failing once its newest advertised frame is older
+  // than this. The nastier of NCEP's two failure modes isn't the renderer
+  // going down — it's the renderer going down while cached GetCapabilities
+  // keeps serving a well-formed frame list from days ago. That list parses
+  // fine, so the live view pins ?t= to a two-day-old instant and paints
+  // nothing, looking exactly like clear skies. The line is drawn at the loop
+  // window: once the newest frame predates it there's no data anywhere in the
+  // loop, so the product is useless rather than merely late.
+  const SOURCE_STALE_MS = LOOP_HOURS * 60 * 60 * 1000;
+  // Tile failures before a source is called down. Individual tiles fail all
+  // the time, so there's also a floor: the failures have to outnumber the
+  // successes. "Nothing at all loaded" would be the obvious test and is the
+  // wrong one — while NCEP was down, Cloudflare kept serving a handful of
+  // low-zoom tiles it had cached from before the outage, so a few always
+  // landed while every tile at the zoom the user was actually looking at
+  // failed.
+  const TILE_ERROR_LIMIT = 4;
+  // How long a source stays marked down before its frame list is re-probed.
+  // A source is never assumed healthy again — only evidence clears the mark.
+  const SOURCE_RETRY_MS = 10 * 60 * 1000;
   // …and cap the total, because the time window alone doesn't bound size. With
   // 201 radar sites x 8 products, sweeping through a few sites would otherwise
   // pile up hundreds of MB inside the 2h window — enough for iOS Safari to
@@ -357,6 +377,12 @@
   // saved choice, so the site returns on its own when the radar does.
   let siteOutage = null;
   let siteRangeHintFor = null; // dedupes the out-of-range prompt
+  // MRMS layer key ("base"/"composite"/…) -> ms at which it may be re-probed.
+  // Presence means "upstream is failing, substitute the IEM product"; the
+  // timestamp only gates re-probing, so an entry never lapses into "healthy"
+  // on its own. Sites use siteOutage above instead, which already owns that
+  // case and its wording.
+  const sourceOutage = new Map();
 
   let radarProductId = loadProductId(); // RADAR_PRODUCTS key or "site:…" id
   let displayedProductId = null; // product the live radarLayer is built for
@@ -578,16 +604,28 @@
     // radar renders identically to clear skies, so this one is a correctness
     // fix, not a preference. radarProductId is left alone, so the site comes
     // back by itself once the radar does.
-    if (siteOutage && siteOutage === radarProductId) return DEFAULT_PRODUCT;
-    const p = RADAR_PRODUCTS[radarProductId];
+    //
+    // Note this falls *through* to the mosaic checks below rather than
+    // returning: NCEP serves the sites and the mosaics from one GeoServer, so
+    // the outage that took the radar out has usually taken the mosaic with it.
+    // Cascading here is what gets such a user to IEM instead of to a second
+    // blank layer.
+    let id = radarProductId;
+    if (siteOutage && siteOutage === id) id = DEFAULT_PRODUCT;
+    const p = RADAR_PRODUCTS[id];
     // Site products miss this lookup, so they never off-CONUS-fallback —
     // correct, since a single radar is inherently regional (and Alaska,
     // Hawaii and Puerto Rico sites are first-class here).
-    if (p && p.mrmsLayer && map) {
-      const c = map.getCenter();
-      if (!inConus(c.lat, c.lng)) return MRMS_FALLBACK[radarProductId] || radarProductId;
+    if (p && p.mrmsLayer) {
+      // Two different reasons for the same substitution: MRMS doesn't cover
+      // this place, or MRMS isn't serving anywhere right now. Either way the
+      // IEM product this one replaced is what takes over.
+      if (sourceOutage.has(p.mrmsLayer)) return MRMS_FALLBACK[id] || id;
+      if (map && !inConus(map.getCenter().lat, map.getCenter().lng)) {
+        return MRMS_FALLBACK[id] || id;
+      }
     }
-    return radarProductId;
+    return id;
   }
 
   // Build (and memoize) the product config for a "site:{site}:{product}" id.
@@ -654,11 +692,90 @@
     );
   }
 
-  // Whether we're currently substituting the off-CONUS fallback for the
-  // selected MRMS-backed product.
+  // Whether we're currently substituting for the selected MRMS-backed product,
+  // for either reason (off-CONUS or upstream outage).
   function mrmsFellBack() {
     const p = RADAR_PRODUCTS[radarProductId];
     return !!(p && p.mrmsLayer) && effectiveProductId() !== radarProductId;
+  }
+
+  // …and specifically because its upstream is failing, which is worth saying
+  // out loud: unlike panning off-CONUS, the user did nothing to cause it.
+  function mrmsSourceFellBack() {
+    const p = RADAR_PRODUCTS[radarProductId];
+    return !!(p && p.mrmsLayer && sourceOutage.has(p.mrmsLayer)) && mrmsFellBack();
+  }
+
+  // A frame list is only useful if it reaches roughly the present. An empty
+  // list and a list that stops two days ago are the same thing to a viewer.
+  function framesFresh(frames) {
+    if (!frames || !frames.length) return false;
+    return Date.now() - frames[frames.length - 1].getTime() < SOURCE_STALE_MS;
+  }
+
+  // One tile source has stopped serving. Sites route through siteOutage, which
+  // already owns the "this radar is offline" case; mosaics get an entry in
+  // sourceOutage. Either way the live layer is rebuilt onto the substitute.
+  function reportSourceDown(p, key) {
+    if (p.site) {
+      if (siteOutage === radarProductId) return;
+      siteOutage = radarProductId;
+    } else {
+      const known = sourceOutage.has(key);
+      sourceOutage.set(key, Date.now() + SOURCE_RETRY_MS);
+      if (known) return; // already substituted; just push the re-probe out
+    }
+    if (effectiveProductId() !== displayedProductId) rebuildLiveLayer();
+  }
+
+  // Watch a live tile layer for a wholesale failure. This is the backstop for
+  // the case the frame list can't catch: capabilities current, renderer down.
+  // Counters run for the life of the layer — a substitution rebuilds the layer,
+  // so they can't carry stale state across one.
+  function watchSourceHealth(layer, p, key) {
+    let errors = 0;
+    let loaded = 0;
+    layer.on("tileload", () => {
+      loaded++;
+    });
+    layer.on("tileerror", () => {
+      errors++;
+      // hasLayer, not `layer === radarLayer`: the first live layer is added to
+      // the map before radarLayer is assigned, so identity would race.
+      if (errors >= TILE_ERROR_LIMIT && errors > loaded && map.hasLayer(layer)) {
+        reportSourceDown(p, key);
+      }
+    });
+    return layer;
+  }
+
+  // While substituted, re-check the *selected* product's own frame list on the
+  // refresh beat. It has to read selectedProduct(), not currentProduct(): once
+  // the substitution is in effect the failing source is no longer what's on
+  // screen, so nothing else in the refresh path ever asks about it again.
+  async function probeSourceRecovery(force) {
+    const sel = selectedProduct();
+    const src = sel && tileSource(sel);
+    if (!src) return;
+    if (sel.site) {
+      if (siteOutage !== radarProductId) return;
+    } else {
+      const retryAt = sourceOutage.get(src.key);
+      if (retryAt === undefined) return;
+      // The cooldown is there to keep us off a dead upstream on the automatic
+      // beat. Tapping Refresh is an explicit "try again", so it skips it.
+      if (!force && Date.now() < retryAt) return;
+    }
+    // maxAgeMs 0: the memo may be holding the very stale list that flagged
+    // this source, and that list can never answer "is it back?".
+    const frames = await ensureFrames(src, 0);
+    if (!framesFresh(frames)) {
+      if (!sel.site) sourceOutage.set(src.key, Date.now() + SOURCE_RETRY_MS);
+      return;
+    }
+    if (sel.site) siteOutage = null;
+    else sourceOutage.delete(src.key);
+    if (effectiveProductId() !== displayedProductId) rebuildLiveLayer();
   }
 
   // Whether the selected radar site is offline and we're showing the mosaic.
@@ -705,6 +822,9 @@
         : "That radar";
       return who + " isn't reporting — showing " + shown + ".";
     }
+    if (mrmsSourceFellBack()) {
+      return "MRMS radar is unavailable — showing " + shown + ".";
+    }
     if (mrmsFellBack()) return "Outside MRMS coverage — showing " + shown + ".";
     if (phrase === "loaded") return shown + " loaded.";
     if (phrase === "live") return "Showing live " + shown + ".";
@@ -728,16 +848,20 @@
       // clock estimate that never matches. primeLive() pins the exact time as
       // soon as the list arrives.
       const frame = liveFrame(src.key);
-      return cachedTileLayer(
-        src.url,
-        Object.assign({}, src.vars, {
-          t: frame ? isoUTC(frame) : "",
-          opacity: sliderToOpacity(els.opacity.value),
-          attribution: p.attribution,
-          zIndex: 5,
-          maxZoom: 15,
-          crossOrigin: "anonymous",
-        })
+      return watchSourceHealth(
+        cachedTileLayer(
+          src.url,
+          Object.assign({}, src.vars, {
+            t: frame ? isoUTC(frame) : "",
+            opacity: sliderToOpacity(els.opacity.value),
+            attribution: p.attribution,
+            zIndex: 5,
+            maxZoom: 15,
+            crossOrigin: "anonymous",
+          })
+        ),
+        p,
+        src.key
       );
     }
     return L.tileLayer(radarTileUrl(p, false), {
@@ -944,19 +1068,15 @@
     if (!src) return;
     const frames = await ensureFrames(src);
 
-    // No frames for a site means the radar isn't reporting. Fall back to the
-    // mosaic (see effectiveProductId) rather than showing an empty map that
-    // looks exactly like clear skies.
-    if (p.site && !frames.length) {
-      if (siteOutage !== radarProductId) {
-        siteOutage = radarProductId;
-        rebuildLiveLayer();
-      }
-      return;
-    }
-    if (p.site && frames.length && siteOutage === radarProductId) {
-      siteOutage = null; // radar came back
-      rebuildLiveLayer();
+    // A frame list that's empty (a site that isn't reporting) or that stops
+    // hours short of now (NCEP serving a stale cached capabilities document)
+    // means this source has nothing to show. Substitute rather than render an
+    // empty map, which looks exactly like clear skies. The saved choice is
+    // left alone, so the source returns on its own once it recovers —
+    // probeSourceRecovery is what notices.
+    if (!framesFresh(frames)) {
+      // currentProduct() can have moved on during the await.
+      if (currentProduct().id === p.id) reportSourceDown(p, src.key);
       return;
     }
 
@@ -1408,6 +1528,11 @@
     radarLayer = next.addTo(map);
     displayedProductId = effectiveProductId();
     if (tileSource(p)) primeLive();
+    // Deliberately picking a product is a request for *that* product, so it
+    // re-probes a source marked down rather than waiting out the cooldown.
+    // (primeLive can't do it: under a substitution the picked source isn't
+    // what's on screen, so nothing else would ask about it.)
+    probeSourceRecovery(true);
     syncSiteMarker();
     syncSiteProductUI();
     syncLegend();
@@ -1446,6 +1571,7 @@
   function refreshRadar(userInitiated) {
     if (!radarLayer || loopOn) return; // the loop drives its own frames
     lastRefreshAt = Date.now();
+    probeSourceRecovery(userInitiated);
     const p = currentProduct();
     const src = tileSource(p);
     if (src) {
