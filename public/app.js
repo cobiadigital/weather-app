@@ -269,6 +269,16 @@
   const LOOP_PLAY_MS = 200;
   const LOOP_END_DWELL_MS = 1200; // linger on the newest frame before looping
   const LOOP_SAFETY_MS = 25000; // play the coarse wave even if a frame stalls
+  // Ceiling on the tiles the loop may hold decoded at once, across all frames.
+  // Preloading every frame trades memory for a flicker-free animation, and
+  // that trade has a hard limit — see setFrameShown for the crash it caused.
+  // A decoded 256px tile is ~0.26 MB, so 360 tiles is ~94 MB of bitmap. That
+  // is sized to clear a phone at full resolution: 390x844 needs 15 tiles a
+  // frame in either orientation, so all 24 frames fit with nothing to spare,
+  // which is the case that matters. Viewports that need more per frame (a
+  // tablet, a desktop window) get a *coarser* loop rather than a shorter one
+  // — it still spans the whole 2 h, at 10- or 20-minute spacing.
+  const LOOP_TILE_BUDGET = 360;
   // Keep cached tiles a little past the loop window, then evict.
   const MRMS_CACHE_WINDOW_MS = (LOOP_HOURS * 60 + 20) * 60 * 1000;
   // A tile source counts as failing once its newest advertised frame is older
@@ -404,6 +414,12 @@
   let loopLoadedSet = new Set(); // frame indices whose tiles have finished
   let loopActive = []; // sorted frame indices currently in the animation
   let loopStride = LOOP_STRIDES[0]; // spacing (in frames) of the active set
+  // Bumped on every startLoop, so a frame-list fetch from an earlier press
+  // can't build a second set of layers over the current one. The orphans
+  // would stay on the map (stopLoop only knows about loopLayers) and their
+  // load events would promote waves against the wrong indices — which added
+  // all 24 frames at once, the worst case for memory.
+  let loopGen = 0;
 
   // Canonical frame times, one list per tile-source key (Date[], oldest ->
   // newest), memoized with a short TTL. Both the live view and the loop snap
@@ -892,12 +908,18 @@
           const src = this.getTileUrl(coords);
           loadCachedTile(src).then((objectUrl) => {
             if (objectUrl) {
+              const revoke = () => {
+                if (!tile._objectUrl) return;
+                URL.revokeObjectURL(tile._objectUrl);
+                tile._objectUrl = null;
+              };
+              tile._objectUrl = objectUrl;
               tile.onload = () => {
-                URL.revokeObjectURL(objectUrl);
+                revoke();
                 done(null, tile);
               };
               tile.onerror = () => {
-                URL.revokeObjectURL(objectUrl);
+                revoke();
                 done(new Error("tile error"), tile);
               };
               tile.src = objectUrl;
@@ -908,6 +930,23 @@
             }
           });
           return tile;
+        },
+
+        // A tile dropped mid-load leaks its object URL — and with it the blob
+        // — because Leaflet swaps onload/onerror for no-ops before removing
+        // the <img>, so the revoke above never runs. Same condition Leaflet
+        // uses, applied one step earlier.
+        _abortLoading() {
+          for (const key in this._tiles) {
+            const t = this._tiles[key];
+            if (t.coords.z !== this._tileZoom && t.el && !t.el.complete) {
+              if (t.el._objectUrl) {
+                URL.revokeObjectURL(t.el._objectUrl);
+                t.el._objectUrl = null;
+              }
+            }
+          }
+          return L.TileLayer.prototype._abortLoading.call(this);
         },
       });
     }
@@ -1513,7 +1552,7 @@
       els.loopBar.classList.add("hidden");
       els.playBtn.disabled = false;
       els.loopScrub.disabled = false;
-      loopLayers.forEach((layer) => map.removeLayer(layer));
+      loopLayers.forEach((layer) => layer && map.removeLayer(layer));
       loopLayers = [];
     }
 
@@ -2222,10 +2261,22 @@
     // MRMS and single sites build their frames from the canonical list, so it
     // must load first; IEM derives frames from the clock and can build now.
     const src = tileSource(p);
+    const gen = ++loopGen;
     if (src) {
-      ensureFrames(src).then(() => {
-        if (loopOn) buildLoopLayers(p);
-      });
+      ensureFrames(src).then(
+        () => {
+          if (loopOn && gen === loopGen) buildLoopLayers(p);
+        },
+        () => {
+          // No frame list, so nothing is ever built — and the safety timer is
+          // armed inside buildLoopLayers, so without this the loop sits at 0%
+          // with its controls disabled until the user taps Loop again.
+          if (loopOn && gen === loopGen) {
+            setStatus("Radar loop unavailable right now.");
+            stopLoop();
+          }
+        }
+      );
     } else {
       buildLoopLayers(p);
     }
@@ -2249,11 +2300,18 @@
 
     // Work out the dyadic waves and each frame's wave, so we can load the
     // coarse frames first and reveal a watchable loop before the rest arrive.
-    loopWaves = computeLoopWaves(total);
+    // The finest wave is capped by the tile budget, so a viewport that needs
+    // a lot of tiles per frame gets a coarser — not a shorter — loop.
+    loopWaves = computeLoopWaves(total, budgetedStride(total));
     loopWaveAdded = loopWaves.map(() => false);
     loopWavePromoted = loopWaves.map(() => false);
     frameWave = new Array(total);
     loopWaves.forEach((wave, w) => wave.forEach((i) => (frameWave[i] = w)));
+    // Frames no wave claimed are outside the budget: no layer is built for
+    // them, so loopLayers has holes. Nothing ever shows one — nearestActive
+    // only ever returns an index that's been promoted into loopActive.
+    const budgeted = new Set();
+    loopWaves.forEach((wave) => wave.forEach((i) => budgeted.add(i)));
 
     // Anti-strobe strategy: rather than swapping the TIME param on a single
     // layer (which re-fetches its tiles every frame and flashes blank while
@@ -2269,9 +2327,13 @@
     // frames come from the time-enabled WMS.
     const src = tileSource(p);
     loopLayers = loopFrames.map((frame, i) => {
+      if (!budgeted.has(i)) return null;
       const shared = {
-        // Show the newest frame right away; keep the rest hidden until shown.
-        opacity: i === loopIndex ? op : 0,
+        // Every frame is built fully opaque and parked with display:none;
+        // setFrameShown is what reveals one, and the slider's opacity is
+        // applied to whichever frame is showing. Building them at opacity 0
+        // is what used to cost ~250 MB — see setFrameShown.
+        opacity: 1,
         zIndex: 5,
         maxZoom: 15,
         crossOrigin: "anonymous", // keep loop frames canvas-exportable (Share)
@@ -2303,6 +2365,9 @@
 
     // Kick off the coarsest wave; each wave adds the next, finer one as it lands.
     addWave(0);
+    // Reveal the newest frame now — loopActive is still empty at this point,
+    // so showLoopFrame has nothing to snap to yet.
+    revealFrame(loopIndex, op);
 
     els.loopScrub.max = String(total - 1);
     els.loopScrub.value = String(loopIndex);
@@ -2314,13 +2379,60 @@
     loopSafety = setTimeout(onPreloadTimeout, LOOP_SAFETY_MS);
   }
 
+  // The finest stride the tile budget allows for an n-frame loop. Tiles per
+  // frame is Leaflet's worst case for the current viewport — derived from the
+  // map's size, not its pixel bounds, so the answer doesn't swing by a whole
+  // row of tiles depending on where the user happens to be panned. Evaluated
+  // on every Loop press, which is where an orientation change gets picked up.
+  function budgetedStride(n) {
+    const size = map.getSize();
+    const perFrame =
+      (Math.ceil(size.x / 256) + 1) * (Math.ceil(size.y / 256) + 1);
+    const maxFrames = Math.max(3, Math.floor(LOOP_TILE_BUDGET / perFrame));
+    // LOOP_STRIDES runs coarse -> fine, so the last one that fits is finest.
+    let floorStride = LOOP_STRIDES[0];
+    for (const stride of LOOP_STRIDES) {
+      if (Math.ceil(n / stride) <= maxFrames) floorStride = stride;
+    }
+    return floorStride;
+  }
+
+  // Show or park one frame layer.
+  //
+  // Parked frames use display:none, not opacity 0. Opacity 0 looks free and
+  // isn't: Leaflet's _updateOpacity stamps an inline opacity on every tile
+  // <img> in the layer, which promotes each tile to its own composited layer
+  // and keeps it rastered at device pixel ratio. Holding 24 frames' worth of
+  // viewport tiles that way cost ~250 MB on a 390x844 phone at DPR 3 — enough
+  // for iOS to kill the tab, which is what "A problem repeatedly occurred"
+  // means. display:none drops the rasters (measured: ~140 MB back) and keeps
+  // only the decoded images, which are the part that makes the swap instant.
+  // So don't "tidy" this back into setOpacity(0).
+  function setFrameShown(layer, shown) {
+    if (!layer) return;
+    const c = layer.getContainer();
+    if (c) c.style.display = shown ? "" : "none";
+  }
+
+  // Park every frame but i, and show i at the slider's opacity.
+  function revealFrame(i, op) {
+    for (let k = 0; k < loopLayers.length; k++) {
+      if (k !== i) setFrameShown(loopLayers[k], false);
+    }
+    const layer = loopLayers[i];
+    if (!layer) return;
+    layer.setOpacity(op);
+    setFrameShown(layer, true);
+  }
+
   // Split the frames into dyadic refinement waves: at each stride, take frames
   // newest-first, skipping any a coarser wave already claimed. Coarsest first,
   // so waves[0] is every 8th frame and the last wave fills in the rest.
-  function computeLoopWaves(n) {
+  function computeLoopWaves(n, floorStride) {
     const waves = [];
     const seen = new Set();
     for (const stride of LOOP_STRIDES) {
+      if (stride < floorStride) break; // finer than the tile budget allows
       const wave = [];
       for (let i = n - 1; i >= 0; i -= stride) {
         if (!seen.has(i)) {
@@ -2338,7 +2450,15 @@
   function addWave(w) {
     if (w >= loopWaves.length || loopWaveAdded[w]) return;
     loopWaveAdded[w] = true;
-    loopWaves[w].forEach((i) => loopLayers[i].addTo(map));
+    loopWaves[w].forEach((i) => {
+      const layer = loopLayers[i];
+      if (!layer) return;
+      layer.addTo(map);
+      // Park it the moment it has a container — the layers are built opaque,
+      // so an unparked frame would paint over the one on screen. Parked tiles
+      // still fetch and decode, which is what the preload is for.
+      if (i !== loopIndex) setFrameShown(layer, false);
+    });
   }
 
   // A wave has fully loaded: fold its frames into the animating set (which
@@ -2409,7 +2529,7 @@
     els.playBtn.disabled = false;
     els.loopScrub.disabled = false;
 
-    loopLayers.forEach((layer) => map.removeLayer(layer));
+    loopLayers.forEach((layer) => layer && map.removeLayer(layer));
     loopLayers = [];
     loopWaves = [];
     frameWave = [];
@@ -2483,8 +2603,11 @@
     const prev = loopIndex;
     loopIndex = target;
     const op = sliderToOpacity(els.opacity.value);
-    if (loopLayers[prev] && prev !== loopIndex) loopLayers[prev].setOpacity(0);
-    if (loopLayers[loopIndex]) loopLayers[loopIndex].setOpacity(op);
+    if (prev !== loopIndex) setFrameShown(loopLayers[prev], false);
+    if (loopLayers[loopIndex]) {
+      loopLayers[loopIndex].setOpacity(op);
+      setFrameShown(loopLayers[loopIndex], true);
+    }
     els.loopScrub.value = String(loopIndex);
     updateLoopLabel();
   }

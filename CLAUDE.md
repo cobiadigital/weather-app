@@ -49,17 +49,42 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
 - **Radar loop (last 2 h, IEM NEXRAD)** — IEM's time-enabled NEXRAD WMS
   `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q-t.cgi`, layer
   `nexrad-n0q-wmst`, driven by the WMS `TIME` parameter (5-minute archive).
-  `app.js` builds one `L.tileLayer.wms` per 5-minute frame (24 layers, all at
-  opacity 0 except the visible one) and animates by toggling opacity between
-  already-loaded layers, so frames don't flash blank while tiles load. Frames
-  are loaded **progressively in dyadic waves** (`LOOP_STRIDES = [8,4,2,1]`):
-  every 8th frame first — a coarse, wide-spaced loop that starts playing after
-  just ~3 frames — then every 4th, 2nd, and finally all 24, each wave doubling
-  the temporal resolution down to the native 5-minute spacing. A wave's layers
+  `app.js` builds one `L.tileLayer.wms` per 5-minute frame (24 layers, all
+  parked except the visible one) and animates by revealing already-loaded
+  layers, so frames don't flash blank while tiles load. Frames are loaded
+  **progressively in dyadic waves** (`LOOP_STRIDES = [8,4,2,1]`): every 8th
+  frame first — a coarse, wide-spaced loop that starts playing after just ~3
+  frames — then every 4th, 2nd, and finally all 24, each wave doubling the
+  temporal resolution down to the native 5-minute spacing. A wave's layers
   are only added to the map (which is what starts their tile requests) once the
   previous, coarser wave has finished, and the animating set grows as each wave
   lands, so the loop densifies mid-play without ever waiting on a blank frame.
   It's a different endpoint than the live tile cache above.
+
+  **Parked frames use `display:none`, not `opacity: 0` (`setFrameShown`).**
+  This is the single most important thing about the loop and the easiest to
+  "tidy" back into a bug. Opacity 0 reads as free and isn't: Leaflet's
+  `GridLayer._updateOpacity` stamps an inline opacity on *every tile `<img>`*
+  in the layer, which promotes each tile to its own composited layer and keeps
+  it rastered at device pixel ratio. Holding 24 frames of viewport tiles that
+  way measured **+254 MB** (renderer +182, GPU +72) on a 390×844 viewport at
+  DPR 3 — enough for iOS to kill the tab, which is what the "A problem
+  repeatedly occurred" page means. Parking with `display:none` drops the
+  rasters and keeps only the decoded images — the part that actually makes the
+  swap instant — for **+116 MB** (GPU flat). Frame layers are therefore built
+  at `opacity: 1`; the opacity slider is applied to whichever frame is showing.
+
+  **The loop is also budgeted by tiles, not frames** (`LOOP_TILE_BUDGET`,
+  360 ≈ 94 MB of decoded bitmap). `budgetedStride()` divides the budget by
+  Leaflet's worst-case tile count for the current viewport (derived from
+  `map.getSize()`, not the pixel bounds, so the answer doesn't swing a whole
+  row of tiles with where the user is panned) and caps how fine the wave
+  sequence may go. A 390×844 phone needs 15 tiles a frame in either
+  orientation, so all 24 frames fit — the case that matters. Bigger viewports
+  get a **coarser** loop, never a shorter one: a 820×1180 tablet runs 12
+  frames at 10-minute spacing, still spanning the full 2 h. Frames outside the
+  budget get no layer at all, so `loopLayers` has holes — every consumer must
+  null-check, and `nearestActive()` only ever returns a promoted index.
 - **Radar (MRMS, cached)** — NCEP's GeoServer (`opengeo.ncep.noaa.gov`,
   `conus` workspace) publishes exactly 4 MRMS layers, and all 4 are wired up as
   products, each `RADAR_PRODUCTS` entry naming its Worker route key via
