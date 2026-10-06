@@ -323,6 +323,22 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     official forecast cone (layer 7) and coastal wind watches/warnings
     (layer 8, `tcww`). Filtered to AL/EP; bulky MapServer fields stripped.
     Edge-cached 300s. Failures degrade to empty collections.
+  - `GET /api/nhc/gis?layers=outlook` → the Graphical Tropical Weather
+    Outlook "Potential Development Region" polygons (MapServer layer 3, not the
+    34 group layer, which can't be queried). Carries `prob2day/risk2day/
+    prob7day/risk7day`; the 7-day values drive the color (yellow/orange/red).
+    Its `basin` is spelled out ("Atlantic"), not `AL`, so it has its own filter
+    and **only Atlantic is kept**. Opt-in: omitting `layers` still returns just
+    cone + watches.
+  - `GET /api/nhc/invests` → Atlantic disturbances NHC has tagged for model
+    runs. They are not in `CurrentStorms.json`, but they do get a-decks under
+    ids `al90`-`al99` + year, so the Worker probes those ten, keeps only ones
+    whose latest model cycle is under 24 h old (retired invests leave their
+    files behind), and returns each with its tracks and a start position (mean
+    of the models' tau 0). Shares `fetchAdeck()` with `/api/nhc/adeck`.
+  - `/tropics` draws both under the storms, behind one **Outlook** toggle, and
+    still draws them when there are no named storms (the empty state frames
+    them instead of the default basin view).
   - **Hazard overlays on `/tropics` (client-side MapServer `/export`)** — the
     same NOAA tropical MapServer, loaded as viewport PNG image overlays so the
     browser gets official NHC symbology/labels without pulling multi‑MB

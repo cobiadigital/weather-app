@@ -56,6 +56,7 @@
     stormsBadge: document.getElementById("stormsBadge"),
     modelsBtn: document.getElementById("modelsBtn"),
     coneBtn: document.getElementById("coneBtn"),
+    outlookBtn: document.getElementById("outlookBtn"),
     arrivalBtn: document.getElementById("arrivalBtn"),
     windsBtn: document.getElementById("windsBtn"),
     windsBtnLabel: document.getElementById("windsBtnLabel"),
@@ -73,11 +74,14 @@
   let ptsLayer; // official forecast points (labeled dots)
   let coneLayer; // NHC forecast cone polygons
   let wwLayer; // coastal wind watches/warnings
+  let outlookLayer; // NHC 7-day outlook areas (disturbances that may develop)
+  let investLayer; // invest markers (their model tracks go in tracksLayer)
   // Separate export overlays: arrival is inverted (black → white); color
   // products (prob. winds / inundation) must not be inverted.
   let arrivalOverlay = null;
   let colorHazardOverlay = null;
   let showModels = true; // spaghetti visible by default
+  let showOutlook = true; // outlook areas visible by default
   let showCone = true; // cone + wind WW visible by default
   let showArrival = false; // TS wind arrival times (off by default — busy overlay)
   let showInundation = false; // storm-surge inundation mosaic
@@ -105,10 +109,12 @@
     }).addTo(map);
 
     // GIS overlays under tracks so official/model lines stay readable on top.
+    outlookLayer = L.layerGroup().addTo(map);
     coneLayer = L.layerGroup().addTo(map);
     wwLayer = L.layerGroup().addTo(map);
     tracksLayer = L.layerGroup().addTo(map);
     ptsLayer = L.layerGroup().addTo(map);
+    investLayer = L.layerGroup().addTo(map);
     stormsLayer = L.layerGroup().addTo(map);
 
     // Debounced export refresh — MapServer /export is per-viewport.
@@ -158,19 +164,27 @@
 
     clearOverlayLayers();
 
+    const bounds = L.latLngBounds([]);
+
     if (!storms.length) {
       renderEmpty();
-      // Only jump to the default basin view on the very first empty load.
+      setStormCount(0);
+      // Disturbances matter most when nothing is named yet.
+      const found = await loadDisturbances(bounds);
+      setStatus(
+        found
+          ? "No named storms. Showing " + found + " area" + (found > 1 ? "s" : "") + " NHC is watching."
+          : "No active tropical cyclones."
+      );
+      // Only frame on the very first empty load.
       if (!hasFramedView) {
-        map.setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
+        if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6 });
+        else map.setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
         hasFramedView = true;
       }
-      setStatus("No active tropical cyclones.");
-      setStormCount(0);
       return;
     }
 
-    const bounds = L.latLngBounds([]);
     storms.forEach((s) => {
       const lat = Number(s.latitudeNumeric);
       const lon = Number(s.longitudeNumeric);
@@ -207,6 +221,7 @@
     await Promise.all([
       Promise.all(storms.map((s) => loadTracks(s, bounds))),
       loadGis(bounds),
+      loadDisturbances(bounds),
     ]);
     if (shouldFrame && bounds.isValid()) {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6 });
@@ -220,6 +235,125 @@
     ptsLayer.clearLayers();
     coneLayer.clearLayers();
     wwLayer.clearLayers();
+    outlookLayer.clearLayers();
+    investLayer.clearLayers();
+  }
+
+  // --- Disturbances: NHC 7-day outlook areas + invest model tracks ---------
+
+  // Outlook colors follow NHC's graphic: yellow low, orange medium, red high.
+  const OUTLOOK_COLORS = { low: "#ffe14d", medium: "#ff9f1a", high: "#ff3b30" };
+
+  // Returns how many areas were drawn (outlook polygons + invests, de-duplicated
+  // is not attempted: an invest normally sits inside an outlook area).
+  async function loadDisturbances(bounds) {
+    const [areas, invests] = await Promise.all([
+      loadOutlook(bounds),
+      loadInvests(bounds),
+    ]);
+    applyOutlookVisibility();
+    return Math.max(areas, invests);
+  }
+
+  async function loadOutlook(bounds) {
+    let fc;
+    try {
+      const res = await fetch("/api/nhc/gis?layers=outlook");
+      if (!res.ok) return 0;
+      fc = (await res.json()).outlook;
+    } catch (_) {
+      return 0;
+    }
+    if (!fc || !fc.features || !fc.features.length) return 0;
+
+    // Draw the lowest-chance areas first so a high-chance area is never buried.
+    const rank = { low: 0, medium: 1, high: 2 };
+    const feats = fc.features.slice().sort((a, b) => {
+      const ra = rank[String((a.properties || {}).risk7day).toLowerCase()] || 0;
+      const rb = rank[String((b.properties || {}).risk7day).toLowerCase()] || 0;
+      return ra - rb;
+    });
+    feats.forEach((feat) => {
+      const p = feat.properties || {};
+      const color = OUTLOOK_COLORS[String(p.risk7day).toLowerCase()] || OUTLOOK_COLORS.low;
+      const layer = L.geoJSON(feat, {
+        style: {
+          color: color,
+          weight: 2,
+          opacity: 0.95,
+          dashArray: "6 5",
+          fillColor: color,
+          fillOpacity: 0.22,
+        },
+      });
+      layer.bindPopup(outlookPopup(p), { className: "storm-popup-wrap" });
+      layer.addTo(outlookLayer);
+      extendBoundsFromGeom(feat.geometry, bounds);
+    });
+    return feats.length;
+  }
+
+  function outlookPopup(p) {
+    return (
+      '<div class="storm-popup"><h3>Area to watch</h3>' +
+      "<div><b>" + esc(p.prob7day || "?") + "</b> chance of development in 7 days (" +
+      esc(p.risk7day || "unknown") + ")</div>" +
+      "<div>" + esc(p.prob2day || "?") + " in 2 days (" + esc(p.risk2day || "unknown") + ")</div>" +
+      '<div class="links">' +
+      link("https://www.nhc.noaa.gov/gtwo.php?basin=atlc&fdays=7", "NHC outlook") +
+      "</div></div>"
+    );
+  }
+
+  async function loadInvests(bounds) {
+    let list;
+    try {
+      const res = await fetch("/api/nhc/invests");
+      if (!res.ok) return 0;
+      list = (await res.json()).invests;
+    } catch (_) {
+      return 0;
+    }
+    if (!list || !list.length) return 0;
+
+    list.forEach((inv) => {
+      L.circleMarker([inv.lat, inv.lon], {
+        radius: 9,
+        color: "#ffffff",
+        weight: 2,
+        dashArray: "3 3",
+        fillColor: "#0b1220",
+        fillOpacity: 0.85,
+      })
+        .bindPopup(investPopup(inv), { className: "storm-popup-wrap" })
+        .addTo(investLayer);
+      bounds.extend([inv.lat, inv.lon]);
+      addTrackFeatures(inv.tracks, bounds);
+    });
+    return list.length;
+  }
+
+  function investPopup(inv) {
+    const when = fmtValid(inv.init, 0);
+    return (
+      '<div class="storm-popup"><h3>' + esc(inv.name) + " (disturbance)</h3>" +
+      "<div>Not yet a tropical cyclone. Lines show model guidance.</div>" +
+      (when ? "<div>Models initialized " + esc(when) + "</div>" : "") +
+      "</div>"
+    );
+  }
+
+  function applyOutlookVisibility() {
+    setGroupOnMap(outlookLayer, showOutlook);
+    setGroupOnMap(investLayer, showOutlook);
+    bringInteractiveLayersFront();
+  }
+
+  function toggleOutlook() {
+    showOutlook = !showOutlook;
+    els.outlookBtn.setAttribute("aria-pressed", showOutlook ? "true" : "false");
+    applyOutlookVisibility();
+    setStatus(showOutlook ? "Areas NHC is watching shown." : "Outlook areas hidden.");
   }
 
   // --- Official NHC GIS (cone / wind WW) via MapServer ---------------------
@@ -317,6 +451,11 @@
     } catch (_) {
       return; // tracks are a nice-to-have; markers already rendered
     }
+    addTrackFeatures(fc, bounds);
+  }
+
+  // Draw one a-deck FeatureCollection (storm or invest) into the track layers.
+  function addTrackFeatures(fc, bounds) {
     if (!fc || !fc.features || !fc.features.length) return;
 
     // Synoptic cycle the aids were initialized on (YYYYMMDDHH, UTC); combined
@@ -476,9 +615,9 @@
   function renderEmpty() {
     els.stormList.innerHTML =
       '<p class="storm-empty">No active tropical cyclones in the Atlantic or ' +
-      "East Pacific right now.<br /><br />See the National Hurricane Center's " +
-      '<a href="https://www.nhc.noaa.gov/gtwo.php" target="_blank" rel="noopener">' +
-      "Tropical Weather Outlook</a> for anything under watch.</p>";
+      "East Pacific right now.<br /><br />Areas NHC is watching appear on the " +
+      'map. See the <a href="https://www.nhc.noaa.gov/gtwo.php" target="_blank" ' +
+      'rel="noopener">Tropical Weather Outlook</a> for details.</p>';
   }
 
   // --- Toggles & sheet -----------------------------------------------------
@@ -787,6 +926,7 @@
     els.stormClose.addEventListener("click", closeSheet);
     els.modelsBtn.addEventListener("click", toggleModels);
     els.coneBtn.addEventListener("click", toggleCone);
+    els.outlookBtn.addEventListener("click", toggleOutlook);
     els.arrivalBtn.addEventListener("click", toggleArrival);
     els.windsBtn.addEventListener("click", toggleWinds);
     els.inundationBtn.addEventListener("click", toggleInundation);

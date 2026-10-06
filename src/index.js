@@ -132,7 +132,13 @@ const NHC_MAPSERVER =
 const NHC_GIS_LAYERS = {
   cone: 7,
   watches: 8,
+  // Graphical Tropical Weather Outlook, "Potential Development Region" polygons
+  // (2-day + 7-day formation chance). Basin is spelled out ("Atlantic"), unlike
+  // the AL/EP codes on the cone and watch layers.
+  outlook: 3,
 };
+// Layers returned when ?layers= is omitted (the outlook is opt-in).
+const NHC_GIS_DEFAULT = ["cone", "watches"];
 
 // NWS/NHC request a User-Agent that identifies the app and a contact. Update the
 // contact if you fork this. See https://www.weather.gov/documentation/services-web-api
@@ -235,6 +241,7 @@ async function handleNHC(request, url) {
   if (sub === "current") return nhcCurrent();
   if (sub === "adeck") return nhcAdeck(url.searchParams.get("id"));
   if (sub === "gis") return nhcGis(url.searchParams.get("layers"));
+  if (sub === "invests") return nhcInvests();
   return json({ error: "Not found" }, 404);
 }
 
@@ -285,13 +292,16 @@ async function nhcGis(rawLayers) {
 
   const out = {};
   requested.forEach((key, i) => {
-    out[key] = filterAtlanticEastPacific(results[i]);
+    out[key] =
+      key === "outlook"
+        ? filterAtlanticOutlook(results[i])
+        : filterAtlanticEastPacific(results[i]);
   });
   return json(out, 200, 300);
 }
 
 function parseGisLayers(raw) {
-  const all = Object.keys(NHC_GIS_LAYERS);
+  const all = NHC_GIS_DEFAULT;
   if (!raw) return all;
   const wanted = String(raw)
     .split(",")
@@ -339,6 +349,10 @@ function slimGisFeature(feat) {
     "fcstprd",
     "stormnum",
     "tcww",
+    "prob2day",
+    "risk2day",
+    "prob7day",
+    "risk7day",
   ]) {
     if (p[k] != null && p[k] !== "") keep[k] = p[k];
   }
@@ -358,18 +372,36 @@ function filterAtlanticEastPacific(fc) {
   return { type: "FeatureCollection", features };
 }
 
+// Outlook areas are labelled by basin name rather than code; this app only
+// shows the Atlantic.
+function filterAtlanticOutlook(fc) {
+  const features = (fc.features || []).filter(
+    (f) => String((f.properties || {}).basin || "").toLowerCase() === "atlantic"
+  );
+  return { type: "FeatureCollection", features };
+}
+
 // Model guidance for one storm, decoded from the gzip'd ATCF a-deck and returned
 // as a GeoJSON FeatureCollection (one LineString per model) so the browser needs
 // no ZIP/parser. Failures degrade to an empty collection: the page still renders
 // the current-position markers without the tracks.
 async function nhcAdeck(rawId) {
   const id = String(rawId || "").toLowerCase();
-  // Guard against SSRF — only well-formed storm ids (e.g. "al052026") get proxied.
+  // Guard against SSRF: only well-formed storm ids (e.g. "al052026") get proxied.
   if (!/^[a-z]{2}\d{6}$/.test(id)) {
     return json({ error: "Invalid storm id" }, 400);
   }
+  const fc = await fetchAdeck(id);
+  return json(
+    fc || { type: "FeatureCollection", properties: { id, init: null }, features: [] },
+    200,
+    300
+  );
+}
 
-  const empty = { type: "FeatureCollection", properties: { id, init: null }, features: [] };
+// Fetch + decode one a-deck. Resolves to null on any upstream or parse failure
+// (including the 404 for an invest that doesn't exist), so callers degrade.
+async function fetchAdeck(id) {
   let upstream;
   try {
     upstream = await fetch(NHC_ADECK_BASE + "a" + id + ".dat.gz", {
@@ -377,23 +409,46 @@ async function nhcAdeck(rawId) {
       cf: { cacheTtl: 300, cacheEverything: true },
     });
   } catch (_) {
-    return json(empty, 200, 300);
+    return null;
   }
-  if (!upstream.ok || !upstream.body) return json(empty, 200, 300);
-
-  let text;
+  if (!upstream.ok || !upstream.body) return null;
   try {
     const stream = upstream.body.pipeThrough(new DecompressionStream("gzip"));
-    text = await new Response(stream).text();
+    return parseAdeck(await new Response(stream).text(), id);
   } catch (_) {
-    return json(empty, 200, 300);
+    return null;
   }
+}
 
-  try {
-    return json(parseAdeck(text, id), 200, 300);
-  } catch (_) {
-    return json(empty, 200, 300);
-  }
+// Atlantic invests: disturbances NHC has tagged for model runs, before (or
+// instead of) becoming a numbered storm. They are not in CurrentStorms.json, but
+// they do get a-decks under ids 90-99, so we probe those ten for the current
+// year. A-deck files linger after an invest is retired, so only ones whose
+// latest model cycle is recent count. Position = where the models start the
+// system (tau 0).
+const INVEST_MAX_AGE_MS = 24 * 3600 * 1000;
+
+async function nhcInvests() {
+  const year = new Date().getUTCFullYear();
+  const ids = [];
+  for (let n = 90; n <= 99; n++) ids.push("al" + n + year);
+  const decks = await Promise.all(ids.map(fetchAdeck));
+
+  const invests = [];
+  decks.forEach((fc, i) => {
+    const init = fc && fc.properties && fc.properties.init;
+    if (!init || !fc.features.length) return;
+    const t = Date.UTC(+init.slice(0, 4), +init.slice(4, 6) - 1, +init.slice(6, 8), +init.slice(8, 10));
+    if (!Number.isFinite(t) || Date.now() - t > INVEST_MAX_AGE_MS) return;
+    const start = fc.features
+      .map((f) => f.geometry.coordinates[0])
+      .filter(Boolean);
+    if (!start.length) return;
+    const lon = start.reduce((a, c) => a + c[0], 0) / start.length;
+    const lat = start.reduce((a, c) => a + c[1], 0) / start.length;
+    invests.push({ id: ids[i], name: "Invest " + ids[i].slice(2, 4), init, lat, lon, tracks: fc });
+  });
+  return json({ invests }, 200, 300);
 }
 
 // Track aids we plot. Interpolated variants (…I) are the position-adjusted aids
