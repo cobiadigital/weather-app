@@ -50,6 +50,9 @@
       }
       .back-link:active { opacity: 0.6; }
 
+      /* 44px hit area (the shared .pin-btn is 40px). */
+      #shareBtn { width: 44px; height: 44px; }
+
       /* Legend, pinned above the bottom controls (two toggle rows). */
       .legend {
         position: absolute;
@@ -173,6 +176,9 @@
         Tropics
       </div>
       <div class="top-actions">
+        <button id="shareBtn" class="pin-btn" type="button" aria-label="Share this view as an image">
+          <span aria-hidden="true">⤴</span>
+        </button>
         <a class="back-link" href="/" aria-label="Back to radar">
           <span aria-hidden="true">◀</span> Radar
         </a>

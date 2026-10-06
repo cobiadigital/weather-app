@@ -339,6 +339,15 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
   - `/tropics` draws both under the storms, behind one **Outlook** toggle, and
     still draws them when there are no named storms (the empty state frames
     them instead of the default basin view).
+  - **Share on `/tropics`** — top-bar button, same Web Share API Level 2 flow
+    as the radar page (files + `text`, never `url`, which makes iOS drop the
+    image; download fallback). `captureView()` paints the basemap tiles, then
+    rasterizes Leaflet's single overlay-pane `<svg>` (outlook, cone, tracks and
+    markers all live there) via a serialized data-URL image, then the MapServer
+    hazard images, then a caption. The hazard images are re-fetched with CORS
+    *for the capture only* rather than setting `crossOrigin` on the on-screen
+    overlays, so a CORS failure drops that overlay from the share instead of
+    breaking it on the map.
   - **Hazard overlays on `/tropics` (client-side MapServer `/export`)** — the
     same NOAA tropical MapServer, loaded as viewport PNG image overlays so the
     browser gets official NHC symbology/labels without pulling multi‑MB

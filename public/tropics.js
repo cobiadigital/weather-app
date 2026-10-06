@@ -62,13 +62,18 @@
     windsBtnLabel: document.getElementById("windsBtnLabel"),
     inundationBtn: document.getElementById("inundationBtn"),
     refreshBtn: document.getElementById("refreshBtn"),
+    shareBtn: document.getElementById("shareBtn"),
     stormSheet: document.getElementById("stormSheet"),
     stormList: document.getElementById("stormList"),
     stormClose: document.getElementById("stormClose"),
     legend: document.getElementById("legend"),
   };
 
+  const SHARE_URL = "https://bendar.app/tropics";
+  const SHARE_TEXT = "Tropical outlook and model tracks — " + SHARE_URL;
+
   let map;
+  let basemapLayer; // kept so Share can copy its tiles onto a canvas
   let stormsLayer; // current-position markers
   let tracksLayer; // all model + official forecast lines
   let ptsLayer; // official forecast points (labeled dots)
@@ -102,10 +107,11 @@
     }).setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
 
     // Via the Worker (/api/basemap/*), which attaches the CARTO key — see app.js.
-    L.tileLayer("/api/basemap/dark/{z}/{x}/{y}{r}.png", {
+    basemapLayer = L.tileLayer("/api/basemap/dark/{z}/{x}/{y}{r}.png", {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a> · Data: <a href="https://www.nhc.noaa.gov/">NOAA NHC</a>',
       maxZoom: 19,
+      crossOrigin: "anonymous", // keep the basemap canvas-exportable (Share)
     }).addTo(map);
 
     // GIS overlays under tracks so official/model lines stay readable on top.
@@ -817,6 +823,201 @@
     }
   }
 
+  // --- Share current view as an image --------------------------------------
+
+  // Same approach as the radar page: paint the visible map onto a canvas and
+  // hand the PNG to the native share sheet (Web Share API Level 2), falling
+  // back to a download. As on the radar page, put the URL in `text` and leave
+  // `url` unset: iOS treats `url` as a link-only share and drops the image.
+  async function shareView() {
+    if (!map) return;
+    els.shareBtn.disabled = true;
+    setStatus("Preparing image…");
+
+    let blob;
+    try {
+      blob = await captureView();
+    } catch (_) {
+      setStatus("Couldn't create the image.", true);
+      els.shareBtn.disabled = false;
+      return;
+    }
+
+    const file = new File([blob], "bendar-tropics.png", { type: "image/png" });
+    const data = { files: [file], title: "Bendar.app tropics", text: SHARE_TEXT };
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share(data);
+        setStatus("Shared.");
+      } else {
+        downloadBlob(blob, "bendar-tropics.png");
+        setStatus("Tropics image saved.");
+      }
+    } catch (err) {
+      // Dismissing the share sheet throws AbortError. Not an error.
+      if (err && err.name === "AbortError") {
+        setStatus("Share canceled.");
+      } else {
+        downloadBlob(blob, "bendar-tropics.png");
+        setStatus("Tropics image saved.");
+      }
+    } finally {
+      els.shareBtn.disabled = false;
+    }
+  }
+
+  // Paint the visible map: basemap tiles, then the vector layers (outlook areas,
+  // cone, tracks, markers) by rasterizing Leaflet's SVG renderer, then the
+  // MapServer hazard images, then a caption. Overlay images are re-fetched with
+  // CORS for the capture only, so the on-screen overlays stay untouched and a
+  // CORS failure just leaves that overlay out of the share.
+  async function captureView() {
+    const size = map.getSize();
+    const zoom = map.getZoom();
+    const origin = map.getPixelBounds().min;
+    const mapRect = map.getContainer().getBoundingClientRect();
+
+    const scale = Math.min(2, window.devicePixelRatio || 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(size.x * scale);
+    canvas.height = Math.round(size.y * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, size.x, size.y);
+
+    drawTiles(ctx, basemapLayer, zoom, origin);
+
+    // Fetch the hazard images in parallel with the SVG decode.
+    const overlays = [
+      { layer: colorHazardOverlay, filter: "none", alpha: 0.82 },
+      { layer: arrivalOverlay, filter: "invert(1)", alpha: 0.95 },
+    ].filter((o) => o.layer && map.hasLayer(o.layer));
+    const [vectors, images] = await Promise.all([
+      rasterizeVectors(),
+      Promise.all(overlays.map((o) => fetchOverlayBitmap(o.layer))),
+    ]);
+
+    if (vectors) ctx.drawImage(vectors.img, vectors.x - mapRect.left, vectors.y - mapRect.top, vectors.w, vectors.h);
+    overlays.forEach((o, i) => {
+      const bmp = images[i];
+      if (!bmp) return;
+      const el = o.layer.getElement();
+      const r = el.getBoundingClientRect();
+      ctx.globalAlpha = o.alpha;
+      if ("filter" in ctx) ctx.filter = o.filter;
+      ctx.drawImage(bmp, r.left - mapRect.left, r.top - mapRect.top, r.width, r.height);
+      ctx.globalAlpha = 1;
+      if ("filter" in ctx) ctx.filter = "none";
+    });
+
+    drawCaption(ctx, size);
+
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))),
+        "image/png"
+      );
+    });
+  }
+
+  function drawTiles(ctx, layer, zoom, origin) {
+    const tiles = layer && layer._tiles;
+    if (!tiles) return;
+    const tz = layer._tileZoom == null ? zoom : layer._tileZoom;
+    const size = 256 * Math.pow(2, zoom - tz);
+    for (const key in tiles) {
+      const tile = tiles[key];
+      if (!tile.current || !tile.loaded || !tile.el || !tile.coords) continue;
+      if (tile.coords.z !== tz) continue;
+      if (tile.el.tagName === "IMG" && !tile.el.naturalWidth) continue;
+      try {
+        ctx.drawImage(tile.el, tile.coords.x * size - origin.x, tile.coords.y * size - origin.y, size, size);
+      } catch (_) {
+        /* one bad tile shouldn't sink the capture */
+      }
+    }
+  }
+
+  // Leaflet draws every vector layer into one <svg> in the overlay pane, sized
+  // a bit larger than the viewport. Serialize it and decode it as an image.
+  // Resolves to null when there's nothing drawn or the browser can't decode it.
+  async function rasterizeVectors() {
+    const svg = map.getPane("overlayPane").querySelector("svg");
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const clone = svg.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("width", rect.width);
+    clone.setAttribute("height", rect.height);
+    clone.style.transform = "none";
+    const url =
+      "data:image/svg+xml;charset=utf-8," +
+      encodeURIComponent(new XMLSerializer().serializeToString(clone));
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return { img, x: rect.left, y: rect.top, w: rect.width, h: rect.height };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function fetchOverlayBitmap(overlay) {
+    try {
+      const res = await fetch(overlay._url, { mode: "cors" });
+      if (!res.ok) return null;
+      return await createImageBitmap(await res.blob());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function drawCaption(ctx, size) {
+    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
+    const x = 12;
+    const barH = 52;
+    const top = size.y - barH;
+    const grad = ctx.createLinearGradient(0, top - 14, 0, size.y);
+    grad.addColorStop(0, "rgba(11, 18, 32, 0)");
+    grad.addColorStop(1, "rgba(11, 18, 32, 0.9)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, top - 14, size.x, barH + 14);
+
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#dbe8ff";
+    ctx.font = "600 15px " + font;
+    ctx.fillText("Bendar.app", x, top + 22);
+    const brandW = ctx.measureText("Bendar.app").width;
+    ctx.fillStyle = "rgba(219, 232, 255, 0.8)";
+    ctx.font = "400 13px " + font;
+    const when = new Date().toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    ctx.fillText("  ·  Tropics · " + when, x + brandW, top + 22);
+
+    ctx.fillStyle = "rgba(219, 232, 255, 0.5)";
+    ctx.font = "400 10px " + font;
+    ctx.fillText("Data: NOAA National Hurricane Center  ·  © OpenStreetMap, © CARTO", x, top + 42);
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   function openSheet() {
     if (!storms.length) return;
     els.stormSheet.classList.remove("hidden");
@@ -931,6 +1132,7 @@
     els.windsBtn.addEventListener("click", toggleWinds);
     els.inundationBtn.addEventListener("click", toggleInundation);
     els.refreshBtn.addEventListener("click", () => loadStorms(true));
+    els.shareBtn.addEventListener("click", shareView);
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") loadStorms(false);
