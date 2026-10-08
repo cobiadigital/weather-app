@@ -36,6 +36,13 @@
     { id: 32, label: "64 kt", status: "64-kt (hurricane) wind probabilities" },
   ];
 
+  // Model track styling. Highlighted aids (Google DeepMind, flagged by the
+  // Worker) get their own color: violet sits clear of the white official
+  // track, the blue consensus and every category color.
+  const MODEL_OPACITY = 0.5;
+  const HIGHLIGHT_OPACITY = 0.9;
+  const HIGHLIGHT_COLOR = "#b388ff";
+
   // Coastal wind watch/warning line colors (NHC interactive-graphic palette).
   const WW_COLORS = {
     HWR: "#ff2d2d", // hurricane warning
@@ -464,11 +471,14 @@
 
     fc.features.forEach((feat) => {
       const p = feat.properties || {};
+      const modelOpacity = p.highlight ? HIGHLIGHT_OPACITY : MODEL_OPACITY;
       const style = p.official
         ? { color: "#ffffff", weight: 4, opacity: 0.95 }
         : p.consensus
         ? { color: "#66ccff", weight: 2.5, opacity: 0.85, dashArray: "5 4" }
-        : { color: "#9fb3c8", weight: 1.5, opacity: showModels ? 0.5 : 0 };
+        : p.highlight
+        ? { color: HIGHLIGHT_COLOR, weight: 3, opacity: showModels ? modelOpacity : 0 }
+        : { color: "#9fb3c8", weight: 1.5, opacity: showModels ? modelOpacity : 0 };
 
       const line = L.geoJSON(feat, {
         style: style,
@@ -477,7 +487,10 @@
         },
       });
       // Tag model lines so the "Models" toggle can hide just those.
-      if (!p.official && !p.consensus) line._isModel = true;
+      if (!p.official && !p.consensus) {
+        line._isModel = true;
+        line._modelOpacity = modelOpacity;
+      }
       line.addTo(tracksLayer);
 
       const coords = feat.geometry && feat.geometry.coordinates;
@@ -631,7 +644,7 @@
 
   function applyModelVisibility() {
     tracksLayer.eachLayer((layer) => {
-      if (layer._isModel) layer.setStyle({ opacity: showModels ? 0.5 : 0 });
+      if (layer._isModel) layer.setStyle({ opacity: showModels ? layer._modelOpacity : 0 });
     });
   }
 

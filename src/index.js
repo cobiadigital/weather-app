@@ -454,6 +454,10 @@ async function nhcInvests() {
 // Track aids we plot. Interpolated variants (…I) are the position-adjusted aids
 // NHC actually overlays; when both a raw and interpolated aid are present for a
 // family we keep the higher-pref one. `family` de-dupes near-identical lines.
+// `highlight` marks an aid the page draws in its own color rather than as grey
+// spaghetti (Google DeepMind's AI ensemble, one of the best recent track aids).
+// The …2 variants are interpolated from the cycle before last, the fallback
+// when the …I aid for the latest cycle hasn't landed yet.
 const TRACK_MODELS = {
   OFCL: { label: "NHC official", family: "OFCL", kind: "official", pref: 2 },
   OFCI: { label: "NHC official", family: "OFCL", kind: "official", pref: 1 },
@@ -474,6 +478,13 @@ const TRACK_MODELS = {
   CMC: { label: "Canadian", family: "CMC", kind: "model", pref: 1 },
   NVGI: { label: "NAVGEM", family: "NAVGEM", kind: "model", pref: 2 },
   NVGM: { label: "NAVGEM", family: "NAVGEM", kind: "model", pref: 1 },
+  GDMI: { label: "Google DeepMind", family: "GDM", kind: "model", pref: 3, highlight: true },
+  GDM2: { label: "Google DeepMind", family: "GDM", kind: "model", pref: 2, highlight: true },
+  GDMN: { label: "Google DeepMind", family: "GDM", kind: "model", pref: 1, highlight: true },
+  HFAI: { label: "HAFS-A", family: "HAFSA", kind: "model", pref: 2 },
+  HFSA: { label: "HAFS-A", family: "HAFSA", kind: "model", pref: 1 },
+  HFBI: { label: "HAFS-B", family: "HAFSB", kind: "model", pref: 2 },
+  HFSB: { label: "HAFS-B", family: "HAFSB", kind: "model", pref: 1 },
   HWFI: { label: "HWRF", family: "HWRF", kind: "model", pref: 2 },
   HWRF: { label: "HWRF", family: "HWRF", kind: "model", pref: 1 },
   HMNI: { label: "HMON", family: "HMON", kind: "model", pref: 2 },
@@ -549,12 +560,15 @@ function parseAdeck(text, id) {
         kind: meta.kind,
         official: meta.kind === "official",
         consensus: meta.kind === "consensus",
+        highlight: !!meta.highlight,
         taus: points.map((p) => p.tau),
         vmax: points.map((p) => p.vmax),
       },
     });
   }
-  features.sort((a, b) => KIND_ORDER[a.properties.kind] - KIND_ORDER[b.properties.kind]);
+  // Highlighted aids draw above the grey spaghetti but under consensus/official.
+  const rank = (f) => KIND_ORDER[f.properties.kind] * 2 + (f.properties.highlight ? 1 : 0);
+  features.sort((a, b) => rank(a) - rank(b));
 
   return { type: "FeatureCollection", properties: { id, init: latest }, features };
 }
