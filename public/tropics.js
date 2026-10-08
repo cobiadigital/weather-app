@@ -114,6 +114,48 @@
   let storms = []; // last-loaded storm list
   let hasFramedView = false; // fit bounds once on first load; refresh keeps the view
 
+  // --- Viewport height -----------------------------------------------------
+
+  // Same fix as app.js (see its "Viewport height" notes): body and #map size
+  // to var(--vh), which styles.css defaults to 100dvh. In an iOS home-screen
+  // (standalone) app that comes up short by the status-bar height, leaving a
+  // blank strip along the bottom, so publish the real height instead:
+  // screen.height when standalone, innerHeight everywhere else (where the gap
+  // is real browser chrome we must not draw under).
+  function isStandalone() {
+    return (
+      (window.matchMedia &&
+        window.matchMedia("(display-mode: standalone)").matches) ||
+      window.navigator.standalone === true
+    );
+  }
+  function measuredViewportHeight() {
+    if (isStandalone() && window.screen && screen.height) {
+      return Math.max(window.innerHeight, screen.height);
+    }
+    return window.innerHeight;
+  }
+  function setViewportHeight() {
+    document.documentElement.style.setProperty(
+      "--vh",
+      measuredViewportHeight() + "px"
+    );
+  }
+  // iOS standalone settles its height a beat late; re-measure over ~1 s.
+  function setViewportHeightSettled() {
+    setViewportHeight();
+    [50, 150, 300, 600, 1000].forEach((ms) =>
+      setTimeout(setViewportHeight, ms)
+    );
+  }
+
+  window.addEventListener("resize", setViewportHeight);
+  window.addEventListener("orientationchange", setViewportHeightSettled);
+  window.addEventListener("pageshow", setViewportHeight);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", setViewportHeight);
+  }
+
   // --- Map setup -----------------------------------------------------------
 
   function initMap() {
@@ -147,7 +189,11 @@
     // Debounced export refresh — MapServer /export is per-viewport.
     map.on("moveend zoomend resize", scheduleHazardOverlayRefresh);
 
-    setTimeout(() => map.invalidateSize(), 0);
+    // Keep Leaflet in step as --vh converges (see setViewportHeightSettled),
+    // so it loads tiles for the full height rather than the first, short one.
+    [0, 150, 600, 1000].forEach((ms) =>
+      setTimeout(() => map && map.invalidateSize(), ms)
+    );
     window.addEventListener("orientationchange", () => {
       setTimeout(() => {
         if (!map) return;
@@ -985,6 +1031,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    setViewportHeightSettled();
     initMap();
     bind();
     loadStorms(false);
