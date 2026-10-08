@@ -367,6 +367,13 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     was drawn on the last load (`legendSeen`) *and* its toggle is on. New
     layers need a `data-k` row in `tropics.html` plus a `legendSeen.add()`
     where they're drawn, or they'll never appear in the key.
+  - **Share** (the ⤴ button) mirrors the radar page's `shareView()`, but the
+    capture differs because this map is mostly vectors: basemap tiles, then
+    the hazard exports (loaded `crossOrigin` so the canvas stays exportable;
+    arrival re-inverted with `ctx.filter`), then each pane's Leaflet `<svg>`
+    serialized and drawn as an image. Clear the clone's inline `translate3d`
+    first, or it applies twice and every shape lands ~10% of the viewport
+    up-left of the map.
 - **Basemap (CARTO, keyed via the Worker)** — the dark basemap under
   everything, on both `/` and `/tropics`. As of **August 2026 CARTO watermarks
   every tile fetched without an API key** ("API KEY REQUIRED" stamped across

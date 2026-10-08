@@ -22,6 +22,8 @@
   // Centered on the tropical Atlantic; bounds are refit once storms load.
   const DEFAULT_VIEW = { lat: 22, lon: -72, zoom: 4 };
   const REFRESH_MS = 10 * 60 * 1000; // advisories update a few times a day
+  const SHARE_URL = "https://bendar.app/tropics";
+  const SHARE_TEXT = "Tropical storm tracking — " + SHARE_URL;
 
   // Same MapServer as /api/nhc/gis; hazard products use /export (see NHC_EXPORT_*).
   const NHC_MAPSERVER =
@@ -73,6 +75,7 @@
     stormList: document.getElementById("stormList"),
     stormClose: document.getElementById("stormClose"),
     legend: document.getElementById("legend"),
+    shareBtn: document.getElementById("shareBtn"),
     legendToggle: document.getElementById("legendToggle"),
     legendWindsLabel: document.getElementById("legendWindsLabel"),
   };
@@ -87,6 +90,7 @@
   let investLayer; // invest markers (their model tracks go in tracksLayer)
   // Separate export overlays: arrival is inverted (black → white); color
   // products (prob. winds / inundation) must not be inverted.
+  let basemapLayer; // kept for the share snapshot (captureView)
   let arrivalOverlay = null;
   let colorHazardOverlay = null;
   // Slots hold the shown overlay plus any still loading (see setExportOverlay).
@@ -179,7 +183,7 @@
     }).setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
 
     // Via the Worker (/api/basemap/*), which attaches the CARTO key — see app.js.
-    L.tileLayer("/api/basemap/dark/{z}/{x}/{y}{r}.png", {
+    basemapLayer = L.tileLayer("/api/basemap/dark/{z}/{x}/{y}{r}.png", {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a> · Data: <a href="https://www.nhc.noaa.gov/">NOAA NHC</a>',
       maxZoom: 19,
@@ -906,6 +910,9 @@
 
     const next = L.imageOverlay(url, bounds, {
       pane: "hazardPane",
+      // MapServer sends CORS headers; asking for them keeps the share canvas
+      // exportable when a hazard overlay is in the shot.
+      crossOrigin: "anonymous",
       opacity: 0,
       interactive: false,
       zIndex: opts.zIndex,
@@ -986,6 +993,188 @@
   }
 
   // --- Helpers -------------------------------------------------------------
+
+  // --- Share current view as an image --------------------------------------
+
+  // Same flow as the radar page's shareView() in app.js (see its notes on the
+  // Web Share payload shape: files + title + text, never `url`, or iOS drops
+  // the image). What differs is the capture: this map is mostly vectors.
+  async function shareView() {
+    if (!map) return;
+    els.shareBtn.disabled = true;
+    setStatus("Preparing image…");
+
+    let blob;
+    try {
+      blob = await captureView();
+    } catch (_) {
+      setStatus("Couldn't create the image.", true);
+      els.shareBtn.disabled = false;
+      return;
+    }
+
+    const name = "bendar-tropics.png";
+    const file = new File([blob], name, { type: "image/png" });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Bendar.app tropics", text: SHARE_TEXT });
+        setStatus("Shared.");
+      } else {
+        downloadBlob(blob, name);
+        setStatus("Tropics image saved.");
+      }
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        setStatus("Share canceled.");
+      } else {
+        downloadBlob(blob, name);
+        setStatus("Tropics image saved.");
+      }
+    } finally {
+      els.shareBtn.disabled = false;
+    }
+  }
+
+  // Paint basemap -> hazard exports -> vectors -> caption, matching the
+  // on-screen stack. The basemap is same-origin and the exports are loaded
+  // with crossOrigin, so the canvas stays exportable.
+  async function captureView() {
+    const size = map.getSize();
+    const zoom = map.getZoom();
+    const origin = map.getPixelBounds().min;
+    const scale = Math.min(2, window.devicePixelRatio || 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(size.x * scale);
+    canvas.height = Math.round(size.y * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, size.x, size.y);
+
+    drawTileLayer(ctx, basemapLayer, zoom, origin);
+    // Colour hazards sit under arrival (zIndex 350 vs 360), same as on screen.
+    drawImageOverlay(ctx, colorHazardOverlay, "none");
+    drawImageOverlay(ctx, arrivalOverlay, "invert(1)"); // mirrors .nhc-arrival-invert
+    await drawVectors(ctx);
+    drawCaption(ctx, size);
+
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))),
+        "image/png"
+      );
+    });
+  }
+
+  // Loaded tiles of a grid layer at their viewport offset (as in app.js).
+  function drawTileLayer(ctx, layer, zoom, origin) {
+    const tiles = layer && layer._tiles;
+    if (!tiles) return;
+    for (const key in tiles) {
+      const tile = tiles[key];
+      if (!tile.current || !tile.loaded || !tile.el || !tile.coords) continue;
+      if (tile.coords.z !== zoom || !tile.el.naturalWidth) continue;
+      try {
+        ctx.drawImage(tile.el, tile.coords.x * 256 - origin.x, tile.coords.y * 256 - origin.y, 256, 256);
+      } catch (_) {
+        /* one bad tile shouldn't sink the whole capture */
+      }
+    }
+  }
+
+  function drawImageOverlay(ctx, overlay, filter) {
+    const img = overlay && map.hasLayer(overlay) && overlay.getElement();
+    if (!img || !img.naturalWidth) return;
+    const b = overlay.getBounds();
+    const nw = map.latLngToContainerPoint(b.getNorthWest());
+    const se = map.latLngToContainerPoint(b.getSouthEast());
+    ctx.save();
+    ctx.globalAlpha = overlay.options.opacity == null ? 1 : overlay.options.opacity;
+    if ("filter" in ctx) ctx.filter = filter;
+    try {
+      ctx.drawImage(img, nw.x, nw.y, se.x - nw.x, se.y - nw.y);
+    } catch (_) {
+      /* a tainted or broken export just stays out of the shot */
+    }
+    ctx.restore();
+  }
+
+  // Leaflet draws every path (storms, tracks, cone, watches, outlook) into
+  // one <svg> per pane. Serialize each, load it as an image, and draw it at its
+  // on-screen offset. Every style lives in SVG attributes, so nothing is lost.
+  async function drawVectors(ctx) {
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const svgs = map.getContainer().querySelectorAll(".leaflet-pane svg");
+    for (const svg of svgs) {
+      const r = svg.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      const clone = svg.cloneNode(true);
+      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      clone.setAttribute("width", r.width);
+      clone.setAttribute("height", r.height);
+      // Leaflet positions the svg with an inline translate3d. Rendered as a
+      // standalone image that transform would apply a second time, on top of
+      // the offset drawImage already uses, and shift every shape.
+      clone.style.transform = "";
+      const src =
+        "data:image/svg+xml;charset=utf-8," +
+        encodeURIComponent(new XMLSerializer().serializeToString(clone));
+      try {
+        const img = await loadImage(src);
+        ctx.drawImage(img, r.left - mapRect.left, r.top - mapRect.top, r.width, r.height);
+      } catch (_) {
+        /* skip a pane that won't render rather than fail the share */
+      }
+    }
+  }
+
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  // Branding + time + credits along the bottom edge (radar caption's layout).
+  function drawCaption(ctx, size) {
+    const font = "-apple-system, system-ui, Helvetica, Arial, sans-serif";
+    const x = 12;
+    const barH = 52;
+    const top = size.y - barH;
+    const grad = ctx.createLinearGradient(0, top - 14, 0, size.y);
+    grad.addColorStop(0, "rgba(11, 18, 32, 0)");
+    grad.addColorStop(1, "rgba(11, 18, 32, 0.9)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, top - 14, size.x, barH + 14);
+
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#dbe8ff";
+    ctx.font = "600 15px " + font;
+    ctx.fillText("Bendar.app", x, top + 22);
+    const brandW = ctx.measureText("Bendar.app").width;
+    const stamp = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    ctx.fillStyle = "rgba(219, 232, 255, 0.8)";
+    ctx.font = "400 13px " + font;
+    ctx.fillText("  ·  Tropics · " + stamp, x + brandW, top + 22);
+
+    ctx.fillStyle = "rgba(219, 232, 255, 0.5)";
+    ctx.font = "400 10px " + font;
+    ctx.fillText("Data: NOAA NHC  ·  © OpenStreetMap, © CARTO", x, top + 42);
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   // --- Map key --------------------------------------------------------------
 
@@ -1164,6 +1353,7 @@
     els.windsBtn.addEventListener("click", toggleWinds);
     els.inundationBtn.addEventListener("click", toggleInundation);
     els.refreshBtn.addEventListener("click", () => loadStorms(true));
+    els.shareBtn.addEventListener("click", shareView);
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") loadStorms(false);
