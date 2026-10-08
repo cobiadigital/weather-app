@@ -390,7 +390,9 @@
       const risk = String(p.risk7day).toLowerCase();
       const color = OUTLOOK_COLORS[risk] || OUTLOOK_COLORS.low;
       legendSeen.add(OUTLOOK_COLORS[risk] ? risk : "low");
-      const layer = L.geoJSON(feat, {
+      // Not tappable, like the cone (see addCone): only points take taps.
+      L.geoJSON(feat, {
+        interactive: false,
         style: {
           color: color,
           weight: 2,
@@ -399,24 +401,10 @@
           fillColor: color,
           fillOpacity: 0.22,
         },
-      });
-      layer.bindPopup(outlookPopup(p), { className: "storm-popup-wrap" });
-      layer.addTo(outlookLayer);
+      }).addTo(outlookLayer);
       extendBoundsFromGeom(feat.geometry, bounds);
     });
     return feats.length;
-  }
-
-  function outlookPopup(p) {
-    return (
-      '<div class="storm-popup"><h3>Area to watch</h3>' +
-      "<div><b>" + esc(p.prob7day || "?") + "</b> chance of development in 7 days (" +
-      esc(p.risk7day || "unknown") + ")</div>" +
-      "<div>" + esc(p.prob2day || "?") + " in 2 days (" + esc(p.risk2day || "unknown") + ")</div>" +
-      '<div class="links">' +
-      link("https://www.nhc.noaa.gov/gtwo.php?basin=atlc&fdays=7", "NHC outlook") +
-      "</div></div>"
-    );
   }
 
   async function loadInvests(bounds) {
