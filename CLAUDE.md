@@ -367,6 +367,11 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     was drawn on the last load (`legendSeen`) *and* its toggle is on. New
     layers need a `data-k` row in `tropics.html` plus a `legendSeen.add()`
     where they're drawn, or they'll never appear in the key.
+  - **Taps.** Only points take taps: storms, invests, and the official
+    forecast points. Cone, outlook areas, watch/warning lines and every
+    track are `interactive: false`, so a tap inside the cone reaches the point under
+    it. Forecast dots are 8px, so each popup sits on an invisible
+    `POINT_HIT_RADIUS` (16px) circle over its dot.
   - **Share** (the ⤴ button) mirrors the radar page's `shareView()`, but the
     capture differs because this map is mostly vectors: basemap tiles, then
     the hazard exports (loaded `crossOrigin` so the canvas stays exportable;

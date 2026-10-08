@@ -44,6 +44,7 @@
   const MODEL_OPACITY = 0.5;
   const HIGHLIGHT_OPACITY = 0.9;
   const HIGHLIGHT_COLOR = "#b388ff";
+  const POINT_HIT_RADIUS = 16; // forecast-point tap target, px (32px across)
 
   // Coastal wind watch/warning line colors (NHC interactive-graphic palette).
   const WW_COLORS = {
@@ -51,12 +52,6 @@
     HWA: "#ff9ec8", // hurricane watch
     TWR: "#3d8bfd", // tropical storm warning
     TWA: "#ffdd33", // tropical storm watch
-  };
-  const WW_LABELS = {
-    HWR: "Hurricane Warning",
-    HWA: "Hurricane Watch",
-    TWR: "Tropical Storm Warning",
-    TWA: "Tropical Storm Watch",
   };
 
   const els = {
@@ -395,7 +390,9 @@
       const risk = String(p.risk7day).toLowerCase();
       const color = OUTLOOK_COLORS[risk] || OUTLOOK_COLORS.low;
       legendSeen.add(OUTLOOK_COLORS[risk] ? risk : "low");
-      const layer = L.geoJSON(feat, {
+      // Not tappable, like the cone (see addCone): only points take taps.
+      L.geoJSON(feat, {
+        interactive: false,
         style: {
           color: color,
           weight: 2,
@@ -404,24 +401,10 @@
           fillColor: color,
           fillOpacity: 0.22,
         },
-      });
-      layer.bindPopup(outlookPopup(p), { className: "storm-popup-wrap" });
-      layer.addTo(outlookLayer);
+      }).addTo(outlookLayer);
       extendBoundsFromGeom(feat.geometry, bounds);
     });
     return feats.length;
-  }
-
-  function outlookPopup(p) {
-    return (
-      '<div class="storm-popup"><h3>Area to watch</h3>' +
-      "<div><b>" + esc(p.prob7day || "?") + "</b> chance of development in 7 days (" +
-      esc(p.risk7day || "unknown") + ")</div>" +
-      "<div>" + esc(p.prob2day || "?") + " in 2 days (" + esc(p.risk2day || "unknown") + ")</div>" +
-      '<div class="links">' +
-      link("https://www.nhc.noaa.gov/gtwo.php?basin=atlc&fdays=7", "NHC outlook") +
-      "</div></div>"
-    );
   }
 
   async function loadInvests(bounds) {
@@ -497,7 +480,10 @@
 
   function addCone(fc, bounds) {
     if (!fc || !fc.features || !fc.features.length) return;
+    // Not interactive: only the storm and forecast points take taps, so a tap
+    // inside the cone reaches the point under the finger instead of the cone.
     L.geoJSON(fc, {
+      interactive: false,
       style: {
         color: "#ffffff",
         weight: 1.5,
@@ -505,14 +491,7 @@
         fillColor: "#ffffff",
         fillOpacity: 0.18,
       },
-      onEachFeature: (feat, layer) => {
-        const p = feat.properties || {};
-        const name = [p.stormtype, p.stormname].filter(Boolean).join(" ") || "Storm";
-        const adv = p.advisnum != null ? "Adv #" + p.advisnum : "";
-        layer.bindTooltip(
-          "Cone · " + name + (adv ? " · " + adv : ""),
-          { sticky: true }
-        );
+      onEachFeature: (feat) => {
         extendBoundsFromGeom(feat.geometry, bounds);
         legendSeen.add("cone");
       },
@@ -522,6 +501,7 @@
   function addWatches(fc, bounds) {
     if (!fc || !fc.features || !fc.features.length) return;
     L.geoJSON(fc, {
+      interactive: false, // the key names the colors; see addCone
       style: (feat) => {
         const code = String((feat.properties || {}).tcww || "").toUpperCase();
         return {
@@ -532,16 +512,9 @@
           lineJoin: "round",
         };
       },
-      onEachFeature: (feat, layer) => {
-        const p = feat.properties || {};
-        const code = String(p.tcww || "").toUpperCase();
-        const label = WW_LABELS[code] || "Watch/Warning";
+      onEachFeature: (feat) => {
+        const code = String((feat.properties || {}).tcww || "").toUpperCase();
         if (WW_COLORS[code]) legendSeen.add(code);
-        const name = [p.stormtype, p.stormname].filter(Boolean).join(" ");
-        layer.bindTooltip(
-          label + (name ? " · " + name : ""),
-          { sticky: true }
-        );
         extendBoundsFromGeom(feat.geometry, bounds);
       },
     }).addTo(wwLayer);
@@ -600,12 +573,8 @@
       legendSeen.add(
         p.official ? "official" : p.consensus ? "consensus" : p.highlight ? "highlight" : "model"
       );
-      const line = L.geoJSON(feat, {
-        style: style,
-        onEachFeature: (f, layer) => {
-          layer.bindTooltip(p.label || p.tech || "model", { sticky: true });
-        },
-      });
+      // Lines aren't tappable (see addCone); the forecast points carry popups.
+      const line = L.geoJSON(feat, { style: style, interactive: false });
       // Tag model lines so the "Models" toggle can hide just those.
       if (!p.official && !p.consensus) {
         line._isModel = true;
@@ -645,18 +614,27 @@
       if (i === 0) return; // point 0 is ~the current position (already marked)
       const tau = p.taus ? p.taus[i] : null;
       const vmax = p.vmax ? p.vmax[i] : null;
-      const marker = L.circleMarker([lat, lon], {
+      L.circleMarker([lat, lon], {
         radius: p.consensus ? 3.5 : 4,
         color: "#0b1220",
         weight: 1,
         fillColor: p.consensus ? "#66ccff" : catInfo(vmax, null).color,
         fillOpacity: 1,
-      });
-      if (!p.consensus) {
-        marker.bindPopup(pointPopup(p.label, init, tau, vmax));
-        legendSeen.add(catKey(catInfo(vmax, null)));
-      }
-      marker.addTo(ptsLayer);
+        interactive: false,
+      }).addTo(ptsLayer);
+      if (p.consensus) return; // consensus dots are markers only, no popup
+
+      // The dot is 8px, far below a usable tap target, so the popup lives on
+      // an invisible 32px circle over it. fillOpacity 0 still hit-tests in
+      // SVG, and the share capture draws nothing for it.
+      L.circleMarker([lat, lon], {
+        radius: POINT_HIT_RADIUS,
+        stroke: false,
+        fillOpacity: 0,
+      })
+        .bindPopup(pointPopup(p.label, init, tau, vmax))
+        .addTo(ptsLayer);
+      legendSeen.add(catKey(catInfo(vmax, null)));
     });
   }
 
