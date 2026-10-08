@@ -1874,8 +1874,10 @@
   // A watch only goes up for a system that threatens the area, so nearest is
   // right in practice; the distance cap stops a Hawaii alert (Central Pacific
   // storms aren't in the feed) from linking to some far-off East Pacific one.
+  // Local Statements count too: a WFO issues one for its whole area, so an
+  // inland county can have the statement with no watch of its own.
   const TROPICAL_EVENT_RE =
-    /^(Tropical Storm|Hurricane|Typhoon|Storm Surge) (Watch|Warning)$/;
+    /^(?:(?:Tropical Storm|Hurricane|Typhoon|Storm Surge) (?:Watch|Warning)|(?:Tropical Cyclone|Hurricane|Typhoon) Local Statement)$/;
   const TROPICAL_LINK_MAX_KM = 2500;
   // NHC classification -> the short prefix shown in the link.
   const STORM_PREFIX = {
