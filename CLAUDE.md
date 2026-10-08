@@ -351,6 +351,22 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
       has not issued a product)
     Toggles default off. The Worker does not proxy these; Leaflet
     `imageOverlay` hits MapServer directly (images don't need CORS).
+    Exports are requested in EPSG:3857 (the map's projection; 4326 drifts
+    off the storm away from the view center), double-buffered so the old
+    image is never stretched over a new viewport, and drawn in their own
+    `hazardPane` under the vector layers.
+  - **Framing.** `fitView()` pads by the real top bar and control panel, and
+    only official + consensus tracks extend the bounds; one stray model run
+    used to zoom the first view out to the whole basin. `?storm=<id>` frames
+    just that storm's position + official track. The radar page links to it
+    ("TS Isaias tracking ›", under the alert pill and on the alert cards)
+    when the location has a tropical watch/warning or Local Statement. NWS
+    tropical alerts never name the storm, so it's the nearest NHC system.
+  - **Map key** is collapsed to a "Key" button by default (choice kept in
+    `localStorage`), and `updateLegend()` shows a row only when that thing
+    was drawn on the last load (`legendSeen`) *and* its toggle is on. New
+    layers need a `data-k` row in `tropics.html` plus a `legendSeen.add()`
+    where they're drawn, or they'll never appear in the key.
 - **Basemap (CARTO, keyed via the Worker)** — the dark basemap under
   everything, on both `/` and `/tropics`. As of **August 2026 CARTO watermarks
   every tile fetched without an API key** ("API KEY REQUIRED" stamped across

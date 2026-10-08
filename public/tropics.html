@@ -50,26 +50,49 @@
       }
       .back-link:active { opacity: 0.6; }
 
-      /* Legend, pinned above the bottom controls (two toggle rows). */
+      /* Map key, pinned above the bottom controls (two toggle rows). Collapses
+         to a 44px "Key" button; expanded, it scrolls if it outgrows the map. */
       .legend {
         position: absolute;
         left: max(10px, env(safe-area-inset-left));
         bottom: calc(env(safe-area-inset-bottom) + 196px);
         z-index: 700;
         max-width: 62vw;
-        padding: 8px 10px;
+        max-height: calc(var(--vh, 100dvh) - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 290px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
         border-radius: 12px;
         background: rgba(11, 18, 32, 0.82);
         backdrop-filter: blur(8px);
         -webkit-backdrop-filter: blur(8px);
         border: 1px solid rgba(255, 255, 255, 0.08);
-        font-size: 11px;
-        line-height: 1.5;
+        font-size: 12px;
+        line-height: 1.6;
         color: #dfe8f5;
-        pointer-events: none;
       }
+      .legend-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 44px;
+        width: 100%;
+        padding: 0 14px;
+        border: none;
+        background: none;
+        color: #dfe8f5;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        text-align: left;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .legend-chev { margin-left: auto; transition: transform 0.15s ease; }
+      .legend:not(.collapsed) .legend-chev { transform: rotate(90deg); }
+      .legend-body { padding: 0 12px 10px; }
+      .legend.collapsed .legend-body { display: none; }
+      .legend section + section { margin-top: 6px; }
       .legend h4 {
-        margin: 0 0 4px;
+        margin: 0 0 2px;
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -89,6 +112,7 @@
         border-top-width: 3px;
         border-top-style: solid;
       }
+      .legend [hidden] { display: none; }
       .legend.hidden { display: none; }
 
       /* NHC arrival contours export as black ink — invert for the dark basemap.
@@ -179,32 +203,52 @@
       </div>
     </header>
 
-    <!-- Category / track legend -->
-    <aside id="legend" class="legend" aria-hidden="false">
-      <h4>Wind category</h4>
-      <div class="row"><span class="swatch" style="background:#ff4dd8"></span> Cat 4–5</div>
-      <div class="row"><span class="swatch" style="background:#ff5a1f"></span> Cat 1–3</div>
-      <div class="row"><span class="swatch" style="background:#28c76f"></span> Trop. storm</div>
-      <div class="row"><span class="swatch" style="background:#7aa0c4"></span> Depression</div>
-      <h4 style="margin-top:6px">Tracks</h4>
-      <div class="row"><span class="line" style="border-color:#ffffff"></span> Official (NHC)</div>
-      <div class="row"><span class="line" style="border-color:#66ccff"></span> Consensus</div>
-      <div class="row"><span class="line" style="border-color:#b388ff"></span> Google DeepMind</div>
-      <div class="row"><span class="line" style="border-color:#9fb3c8"></span> Model guidance</div>
-      <h4 style="margin-top:6px">7-day outlook</h4>
-      <div class="row"><span class="swatch" style="background:rgba(255,59,48,0.45);border:1px dashed #ff3b30"></span> High (60%+)</div>
-      <div class="row"><span class="swatch" style="background:rgba(255,159,26,0.45);border:1px dashed #ff9f1a"></span> Medium</div>
-      <div class="row"><span class="swatch" style="background:rgba(255,225,77,0.45);border:1px dashed #ffe14d"></span> Low</div>
-      <h4 style="margin-top:6px">NHC overlay</h4>
-      <div class="row"><span class="swatch" style="background:rgba(255,255,255,0.45);border:1px solid #fff"></span> Forecast cone</div>
-      <div class="row"><span class="line" style="border-color:#ffdd33;border-top-width:4px"></span> TS watch</div>
-      <div class="row"><span class="line" style="border-color:#3d8bfd;border-top-width:4px"></span> TS warning</div>
-      <div class="row"><span class="line" style="border-color:#ff9ec8;border-top-width:4px"></span> HU watch</div>
-      <div class="row"><span class="line" style="border-color:#ff2d2d;border-top-width:4px"></span> HU warning</div>
-      <h4 style="margin-top:6px">Hazards</h4>
-      <div class="row"><span class="line" style="border-color:#fff;border-top-width:2px"></span> TS wind arrival</div>
-      <div class="row"><span class="swatch" style="background:linear-gradient(90deg,#267300,#55ff00,#e69600,#e60000,#a900e6)"></span> Prob. winds</div>
-      <div class="row"><span class="swatch" style="background:#3d7cff"></span> Inundation</div>
+    <!-- Map key. Collapsed to a "Key" button by default; tropics.js shows
+         only the rows for things actually drawn (see updateLegend). -->
+    <aside id="legend" class="legend collapsed">
+      <button id="legendToggle" class="legend-toggle" type="button" aria-expanded="false" aria-controls="legendBody">
+        Key <span class="legend-chev" aria-hidden="true">▸</span>
+      </button>
+      <div id="legendBody" class="legend-body">
+        <section data-sec>
+          <h4>Wind category</h4>
+          <div class="row" data-k="cat5"><span class="swatch" style="background:#ff4dd8"></span> Cat 5</div>
+          <div class="row" data-k="cat4"><span class="swatch" style="background:#e0192b"></span> Cat 4</div>
+          <div class="row" data-k="cat3"><span class="swatch" style="background:#ff5a1f"></span> Cat 3</div>
+          <div class="row" data-k="cat2"><span class="swatch" style="background:#ff8c00"></span> Cat 2</div>
+          <div class="row" data-k="cat1"><span class="swatch" style="background:#ffd11a"></span> Cat 1</div>
+          <div class="row" data-k="ts"><span class="swatch" style="background:#28c76f"></span> Trop. storm</div>
+          <div class="row" data-k="td"><span class="swatch" style="background:#7aa0c4"></span> Depression</div>
+        </section>
+        <section data-sec>
+          <h4>Tracks</h4>
+          <div class="row" data-k="official"><span class="line" style="border-color:#ffffff"></span> Official (NHC)</div>
+          <div class="row" data-k="consensus"><span class="line" style="border-color:#66ccff;border-top-style:dashed"></span> Consensus</div>
+          <div class="row" data-k="highlight"><span class="line" style="border-color:#b388ff"></span> Google DeepMind</div>
+          <div class="row" data-k="model"><span class="line" style="border-color:#9fb3c8"></span> Model guidance</div>
+        </section>
+        <section data-sec>
+          <h4>7-day outlook</h4>
+          <div class="row" data-k="high"><span class="swatch" style="background:rgba(255,59,48,0.45);border:1px dashed #ff3b30"></span> High (60%+)</div>
+          <div class="row" data-k="medium"><span class="swatch" style="background:rgba(255,159,26,0.45);border:1px dashed #ff9f1a"></span> Medium</div>
+          <div class="row" data-k="low"><span class="swatch" style="background:rgba(255,225,77,0.45);border:1px dashed #ffe14d"></span> Low</div>
+          <div class="row" data-k="invest"><span class="swatch" style="background:#0b1220;border:2px dashed #fff;border-radius:50%"></span> Invest</div>
+        </section>
+        <section data-sec>
+          <h4>NHC overlay</h4>
+          <div class="row" data-k="cone"><span class="swatch" style="background:rgba(255,255,255,0.45);border:1px solid #fff"></span> Forecast cone</div>
+          <div class="row" data-k="TWA"><span class="line" style="border-color:#ffdd33;border-top-width:4px"></span> TS watch</div>
+          <div class="row" data-k="TWR"><span class="line" style="border-color:#3d8bfd;border-top-width:4px"></span> TS warning</div>
+          <div class="row" data-k="HWA"><span class="line" style="border-color:#ff9ec8;border-top-width:4px"></span> HU watch</div>
+          <div class="row" data-k="HWR"><span class="line" style="border-color:#ff2d2d;border-top-width:4px"></span> HU warning</div>
+        </section>
+        <section data-sec>
+          <h4>Hazards</h4>
+          <div class="row" data-k="arrival"><span class="line" style="border-color:#fff;border-top-width:2px"></span> TS wind arrival</div>
+          <div class="row" data-k="winds"><span class="swatch" style="background:linear-gradient(90deg,#267300,#55ff00,#e69600,#e60000,#a900e6)"></span> <span id="legendWindsLabel">Prob. winds</span></div>
+          <div class="row" data-k="inundation"><span class="swatch" style="background:#3d7cff"></span> Inundation</div>
+        </section>
+      </div>
     </aside>
 
     <!-- Slide-up storm list -->

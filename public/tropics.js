@@ -73,6 +73,8 @@
     stormList: document.getElementById("stormList"),
     stormClose: document.getElementById("stormClose"),
     legend: document.getElementById("legend"),
+    legendToggle: document.getElementById("legendToggle"),
+    legendWindsLabel: document.getElementById("legendWindsLabel"),
   };
 
   let map;
@@ -246,6 +248,7 @@
     }
 
     clearOverlayLayers();
+    legendSeen.clear();
 
     const bounds = L.latLngBounds([]);
     const focusBounds = L.latLngBounds([]); // just the ?storm= system, if any
@@ -262,10 +265,11 @@
       );
       // Only frame on the very first empty load.
       if (!hasFramedView) {
-        if (bounds.isValid()) map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6 });
+        if (bounds.isValid()) fitView(bounds);
         else map.setView([DEFAULT_VIEW.lat, DEFAULT_VIEW.lon], DEFAULT_VIEW.zoom);
         hasFramedView = true;
       }
+      updateLegend();
       return;
     }
 
@@ -287,6 +291,7 @@
 
       bounds.extend([lat, lon]);
       if (isFocus(s)) focusBounds.extend([lat, lon]);
+      legendSeen.add(catKey(cat));
     });
 
     renderStormList();
@@ -299,23 +304,38 @@
     // reloads keep whatever pan/zoom the user has.
     const shouldFrame = !hasFramedView;
     const frame = () => (focusBounds.isValid() ? focusBounds : bounds);
-    if (shouldFrame && frame().isValid()) {
-      map.fitBounds(frame(), { padding: [60, 60], maxZoom: 6 });
-    }
+    if (shouldFrame) fitView(frame());
 
     // Model tracks + official GIS overlays in parallel; each may extend bounds.
-    // For the focused storm only the official track joins focusBounds: a
-    // stray model run can wander off across the Atlantic and zoom the view out
-    // to the whole basin, which is what focusing is meant to avoid.
+    // For the focused storm only its official track joins focusBounds.
     await Promise.all([
       Promise.all(storms.map((s) => loadTracks(s, bounds, isFocus(s) ? focusBounds : null))),
       loadGis(bounds),
       loadDisturbances(bounds),
     ]);
-    if (shouldFrame && frame().isValid()) {
-      map.fitBounds(frame(), { padding: [50, 50], maxZoom: 6 });
-    }
+    if (shouldFrame) fitView(frame());
     if (shouldFrame) hasFramedView = true;
+    updateLegend();
+  }
+
+  // Frame bounds into the part of the map not covered by the top bar and the
+  // bottom control panel. A flat 50px pad on every side ignored the ~300px
+  // panel yet ate a quarter of a 390px-wide phone, which pushed a
+  // two-basin view (Gulf + East Pacific) out to zoom 2.
+  function fitView(b) {
+    if (!b || !b.isValid()) return;
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const top = document.querySelector(".topbar");
+    const controls = document.querySelector(".controls");
+    const padTop = top ? Math.max(0, top.getBoundingClientRect().bottom - mapRect.top) : 0;
+    const padBottom = controls
+      ? Math.max(0, mapRect.bottom - controls.getBoundingClientRect().top)
+      : 0;
+    map.fitBounds(b, {
+      paddingTopLeft: [16, padTop + 12],
+      paddingBottomRight: [16, padBottom + 12],
+      maxZoom: 6,
+    });
   }
 
   function isFocus(s) {
@@ -368,7 +388,9 @@
     });
     feats.forEach((feat) => {
       const p = feat.properties || {};
-      const color = OUTLOOK_COLORS[String(p.risk7day).toLowerCase()] || OUTLOOK_COLORS.low;
+      const risk = String(p.risk7day).toLowerCase();
+      const color = OUTLOOK_COLORS[risk] || OUTLOOK_COLORS.low;
+      legendSeen.add(OUTLOOK_COLORS[risk] ? risk : "low");
       const layer = L.geoJSON(feat, {
         style: {
           color: color,
@@ -421,6 +443,7 @@
         .bindPopup(investPopup(inv), { className: "storm-popup-wrap" })
         .addTo(investLayer);
       bounds.extend([inv.lat, inv.lon]);
+      legendSeen.add("invest");
       addTrackFeatures(inv.tracks, bounds);
     });
     return list.length;
@@ -440,6 +463,7 @@
     setGroupOnMap(outlookLayer, showOutlook);
     setGroupOnMap(investLayer, showOutlook);
     bringInteractiveLayersFront();
+    updateLegend();
   }
 
   function toggleOutlook() {
@@ -486,6 +510,7 @@
           { sticky: true }
         );
         extendBoundsFromGeom(feat.geometry, bounds);
+        legendSeen.add("cone");
       },
     }).addTo(coneLayer);
   }
@@ -507,6 +532,7 @@
         const p = feat.properties || {};
         const code = String(p.tcww || "").toUpperCase();
         const label = WW_LABELS[code] || "Watch/Warning";
+        if (WW_COLORS[code]) legendSeen.add(code);
         const name = [p.stormtype, p.stormname].filter(Boolean).join(" ");
         layer.bindTooltip(
           label + (name ? " · " + name : ""),
@@ -567,6 +593,9 @@
         ? { color: HIGHLIGHT_COLOR, weight: 3, opacity: showModels ? modelOpacity : 0 }
         : { color: "#9fb3c8", weight: 1.5, opacity: showModels ? modelOpacity : 0 };
 
+      legendSeen.add(
+        p.official ? "official" : p.consensus ? "consensus" : p.highlight ? "highlight" : "model"
+      );
       const line = L.geoJSON(feat, {
         style: style,
         onEachFeature: (f, layer) => {
@@ -581,7 +610,12 @@
       line.addTo(tracksLayer);
 
       const coords = feat.geometry && feat.geometry.coordinates;
-      if (coords) coords.forEach(([lon, lat]) => bounds.extend([lat, lon]));
+      // Only the official and consensus tracks frame the view. Individual
+      // model runs are left out: one that wanders off across the Atlantic
+      // used to zoom the first view out to the whole basin.
+      if (coords && (p.official || p.consensus)) {
+        coords.forEach(([lon, lat]) => bounds.extend([lat, lon]));
+      }
       if (coords && p.official && officialBounds) {
         coords.forEach(([lon, lat]) => officialBounds.extend([lat, lon]));
       }
@@ -614,7 +648,10 @@
         fillColor: p.consensus ? "#66ccff" : catInfo(vmax, null).color,
         fillOpacity: 1,
       });
-      if (!p.consensus) marker.bindPopup(pointPopup(p.label, init, tau, vmax));
+      if (!p.consensus) {
+        marker.bindPopup(pointPopup(p.label, init, tau, vmax));
+        legendSeen.add(catKey(catInfo(vmax, null)));
+      }
       marker.addTo(ptsLayer);
     });
   }
@@ -736,6 +773,7 @@
     tracksLayer.eachLayer((layer) => {
       if (layer._isModel) layer.setStyle({ opacity: showModels ? layer._modelOpacity : 0 });
     });
+    updateLegend();
   }
 
   function toggleCone() {
@@ -792,6 +830,7 @@
     setGroupOnMap(coneLayer, showCone);
     setGroupOnMap(wwLayer, showCone);
     bringInteractiveLayersFront();
+    updateLegend();
   }
 
   function bringInteractiveLayersFront() {
@@ -923,6 +962,7 @@
     );
 
     bringInteractiveLayersFront();
+    updateLegend();
   }
 
   function setGroupOnMap(group, on) {
@@ -946,6 +986,81 @@
   }
 
   // --- Helpers -------------------------------------------------------------
+
+  // --- Map key --------------------------------------------------------------
+
+  // Keys of everything drawn on the last load (category keys, track kinds,
+  // outlook risks, watch/warning codes, …), matching the key's data-k rows.
+  // updateLegend() shows a row only if it was drawn AND its layer is toggled
+  // on, hides any section left empty, and hides the key if nothing is left.
+  const legendSeen = new Set();
+  const CAT_KEYS = {
+    "Category 5": "cat5",
+    "Category 4": "cat4",
+    "Category 3": "cat3",
+    "Category 2": "cat2",
+    "Category 1": "cat1",
+    "Tropical Storm": "ts",
+  };
+  const LEGEND_OPEN_KEY = "tropics.legendOpen";
+
+  function catKey(cat) {
+    return CAT_KEYS[cat.name] || "td"; // depressions + subtropical share a color
+  }
+
+  function legendRowVisible(k) {
+    if (k === "arrival") return showArrival;
+    if (k === "winds") return windMode >= 0;
+    if (k === "inundation") return showInundation;
+    if (!legendSeen.has(k)) return false;
+    if (k === "model" || k === "highlight") return showModels;
+    if (k === "cone" || WW_COLORS[k]) return showCone;
+    if (k === "low" || k === "medium" || k === "high" || k === "invest") return showOutlook;
+    return true;
+  }
+
+  function updateLegend() {
+    if (!els.legend) return;
+    if (els.legendWindsLabel) {
+      els.legendWindsLabel.textContent =
+        windMode >= 0 ? "Prob. winds (" + NHC_EXPORT_WINDS[windMode].label + ")" : "Prob. winds";
+    }
+    let any = false;
+    els.legend.querySelectorAll("section[data-sec]").forEach((sec) => {
+      let shown = 0;
+      sec.querySelectorAll(".row[data-k]").forEach((row) => {
+        const on = legendRowVisible(row.dataset.k);
+        row.hidden = !on;
+        if (on) shown++;
+      });
+      sec.hidden = !shown;
+      if (shown) any = true;
+    });
+    els.legend.classList.toggle("hidden", !any);
+  }
+
+  function setLegendOpen(open, remember) {
+    els.legend.classList.toggle("collapsed", !open);
+    els.legendToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!remember) return;
+    try {
+      localStorage.setItem(LEGEND_OPEN_KEY, open ? "1" : "0");
+    } catch (_) {
+      /* private mode — the choice just won't persist */
+    }
+  }
+
+  function initLegend() {
+    let open = false; // collapsed by default: the open key covers a third of a phone map
+    try {
+      open = localStorage.getItem(LEGEND_OPEN_KEY) === "1";
+    } catch (_) {}
+    setLegendOpen(open, false);
+    els.legendToggle.addEventListener("click", () =>
+      setLegendOpen(els.legend.classList.contains("collapsed"), true)
+    );
+    updateLegend();
+  }
 
   function setStatus(msg, isError) {
     els.status.textContent = msg;
@@ -1039,6 +1154,7 @@
   // --- Wire up -------------------------------------------------------------
 
   function bind() {
+    initLegend();
     els.stormsBtn.addEventListener("click", openSheet);
     els.stormClose.addEventListener("click", closeSheet);
     els.modelsBtn.addEventListener("click", toggleModels);
