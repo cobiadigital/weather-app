@@ -76,14 +76,18 @@
         >
           <span aria-hidden="true">⚙</span>
         </button>
-        <button
-          id="alertPill"
-          class="alert-pill hidden"
-          type="button"
-          aria-expanded="false"
-        >
-          <span id="alertPillText">Alerts</span>
-        </button>
+        <div class="alert-stack">
+          <button
+            id="alertPill"
+            class="alert-pill hidden"
+            type="button"
+            aria-expanded="false"
+          >
+            <span id="alertPillText">Alerts</span>
+          </button>
+          <!-- Shown under the pill when a local alert is a tropical watch/warning. -->
+          <a id="tropicsLink" class="tropics-link hidden" href="/tropics"></a>
+        </div>
       </div>
     </header>
 
