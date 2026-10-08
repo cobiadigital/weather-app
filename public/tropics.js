@@ -87,6 +87,22 @@
   // products (prob. winds / inundation) must not be inverted.
   let arrivalOverlay = null;
   let colorHazardOverlay = null;
+  // Slots hold the shown overlay plus any still loading (see setExportOverlay).
+  const arrivalSlot = {
+    get: () => arrivalOverlay,
+    set: (v) => {
+      arrivalOverlay = v;
+    },
+    pending: null,
+  };
+  const colorHazardSlot = {
+    get: () => colorHazardOverlay,
+    set: (v) => {
+      colorHazardOverlay = v;
+    },
+    pending: null,
+  };
+  const EXPORT_PAD = 0.25; // fraction of the viewport fetched beyond each edge
   let showModels = true; // spaghetti visible by default
   let showOutlook = true; // outlook areas visible by default
   let showCone = true; // cone + wind WW visible by default
@@ -114,6 +130,10 @@
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a> · Data: <a href="https://www.nhc.noaa.gov/">NOAA NHC</a>',
       maxZoom: 19,
     }).addTo(map);
+
+    // MapServer hazard exports get their own pane under the vector overlays
+    // (overlayPane is 400), so contours never cover the tracks or cone.
+    map.createPane("hazardPane").style.zIndex = 350;
 
     // GIS overlays under tracks so official/model lines stay readable on top.
     outlookLayer = L.layerGroup().addTo(map);
@@ -707,9 +727,11 @@
   function bringInteractiveLayersFront() {
     // Re-adding overlays can stack above markers; keep interaction targets on top.
     if (!map) return;
-    if (map.hasLayer(tracksLayer)) tracksLayer.bringToFront();
-    if (map.hasLayer(ptsLayer)) ptsLayer.bringToFront();
-    if (map.hasLayer(stormsLayer)) stormsLayer.bringToFront();
+    // Plain LayerGroups have no bringToFront, so raise each member instead.
+    const raise = (l) => (l.bringToFront ? l.bringToFront() : l.eachLayer && l.eachLayer(raise));
+    [tracksLayer, ptsLayer, stormsLayer].forEach((g) => {
+      if (map.hasLayer(g)) g.eachLayer(raise);
+    });
   }
 
   // --- MapServer /export hazard overlays -----------------------------------
@@ -729,22 +751,25 @@
     }, 180);
   }
 
+  // Request the export in Web Mercator (3857), the map's own projection. An
+  // EPSG:4326 image is a plain lat/lon grid; stretched over Mercator bounds it
+  // lands increasingly far north/south of the storm the further it is from
+  // the center of the view. Pixels are scaled for retina (capped at 2x and at
+  // the server's 4096px limit) with dpi raised to match, so labels and
+  // contours come back sharp at their normal on-screen size.
   function exportImageUrl(layerIds, bounds, size) {
-    // MapServer caps image size; keep export cheap on retina phones.
-    const w = Math.max(64, Math.min(Math.round(size.x), 1280));
-    const h = Math.max(64, Math.min(Math.round(size.y), 1280));
-    const bbox = [
-      bounds.getWest(),
-      bounds.getSouth(),
-      bounds.getEast(),
-      bounds.getNorth(),
-    ].join(",");
+    const crs = map.options.crs;
+    const sw = crs.project(bounds.getSouthWest());
+    const ne = crs.project(bounds.getNorthEast());
+    const scale = Math.min(window.devicePixelRatio || 1, 2, 4096 / Math.max(size.x, size.y, 1));
+    const w = Math.max(64, Math.round(size.x * scale));
+    const h = Math.max(64, Math.round(size.y * scale));
     const params = new URLSearchParams({
-      bbox: bbox,
-      bboxSR: "4326",
-      imageSR: "4326",
+      bbox: [sw.x, sw.y, ne.x, ne.y].join(","),
+      bboxSR: "3857",
+      imageSR: "3857",
       size: w + "," + h,
-      dpi: "96",
+      dpi: String(Math.round(96 * scale)),
       format: "png32",
       transparent: "true",
       layers: "show:" + layerIds.join(","),
@@ -753,46 +778,60 @@
     return NHC_MAPSERVER + "/export?" + params.toString();
   }
 
+  // Double-buffered: the new viewport's image loads into a fresh, hidden
+  // overlay and replaces the old one only once it has arrived. Swapping the
+  // URL and bounds of a single overlay instead stretched the previous image
+  // over the new bounds while the new one downloaded, which is what made the
+  // overlay jump and smear after every pan or zoom.
   function setExportOverlay(slot, url, bounds, opts) {
-    let overlay = slot.get();
+    const current = slot.get();
     if (!url) {
-      if (overlay) {
-        map.removeLayer(overlay);
-        slot.set(null);
-      }
+      if (current) map.removeLayer(current);
+      if (slot.pending) map.removeLayer(slot.pending);
+      slot.pending = null;
+      slot.set(null);
       return;
     }
-    if (!overlay) {
-      overlay = L.imageOverlay(url, bounds, {
-        opacity: opts.opacity,
-        interactive: false,
-        zIndex: opts.zIndex,
-        className: opts.className || "",
-      }).addTo(map);
-      slot.set(overlay);
-    } else {
-      overlay.setUrl(url);
-      overlay.setBounds(bounds);
-      if (!map.hasLayer(overlay)) overlay.addTo(map);
-    }
+    if (current && current._url === url) return;
+    if (slot.pending) map.removeLayer(slot.pending);
+
+    const next = L.imageOverlay(url, bounds, {
+      pane: "hazardPane",
+      opacity: 0,
+      interactive: false,
+      zIndex: opts.zIndex,
+      className: opts.className || "",
+    });
+    slot.pending = next;
+    next.once("load", () => {
+      if (slot.pending !== next) return; // superseded by a newer viewport
+      slot.pending = null;
+      next.setOpacity(opts.opacity);
+      const prev = slot.get();
+      if (prev) map.removeLayer(prev);
+      slot.set(next);
+    });
+    next.once("error", () => {
+      if (slot.pending !== next) return;
+      slot.pending = null;
+      map.removeLayer(next);
+    });
+    next.addTo(map);
   }
 
   function refreshHazardOverlay() {
     if (!map) return;
-    const bounds = map.getBounds();
-    const size = map.getSize();
+    // Cover a margin around the viewport so a short pan doesn't uncover an
+    // empty edge before the next export arrives.
+    const bounds = map.getBounds().pad(EXPORT_PAD);
+    const size = map.getSize().multiplyBy(1 + 2 * EXPORT_PAD);
 
     // Arrival alone so we can invert black contours without wrecking wind colors.
     const arrivalUrl = showArrival
       ? exportImageUrl(NHC_EXPORT_ARRIVAL, bounds, size)
       : null;
     setExportOverlay(
-      {
-        get: () => arrivalOverlay,
-        set: (v) => {
-          arrivalOverlay = v;
-        },
-      },
+      arrivalSlot,
       arrivalUrl,
       bounds,
       {
@@ -807,12 +846,7 @@
       ? exportImageUrl(colorIds, bounds, size)
       : null;
     setExportOverlay(
-      {
-        get: () => colorHazardOverlay,
-        set: (v) => {
-          colorHazardOverlay = v;
-        },
-      },
+      colorHazardSlot,
       colorUrl,
       bounds,
       { opacity: 0.82, zIndex: 350 }
