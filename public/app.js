@@ -322,6 +322,7 @@
     opacityVal: document.getElementById("opacityVal"),
     alertPill: document.getElementById("alertPill"),
     alertPillText: document.getElementById("alertPillText"),
+    tropicsLink: document.getElementById("tropicsLink"),
     alertSheet: document.getElementById("alertSheet"),
     alertList: document.getElementById("alertList"),
     alertClose: document.getElementById("alertClose"),
@@ -1847,6 +1848,7 @@
   }
 
   async function loadAlerts(lat, lon) {
+    const seq = ++alertsSeq;
     try {
       const point = lat.toFixed(4) + "," + lon.toFixed(4);
       const res = await fetch(
@@ -1854,11 +1856,96 @@
       );
       if (!res.ok) throw new Error("alerts " + res.status);
       const data = await res.json();
+      if (seq !== alertsSeq) return; // a newer location's alerts won the race
       renderAlerts(data.features || []);
+      linkTropicalAlerts(data.features || [], lat, lon, seq);
     } catch (err) {
       // Alerts are a nice-to-have; never let a failure hide the radar.
+      if (seq !== alertsSeq) return;
       els.alertPill.classList.add("hidden");
+      els.tropicsLink.classList.add("hidden");
     }
+  }
+
+  // --- Tropical alerts -> /tropics link --------------------------------------
+
+  // NWS tropical alerts never name the storm (checked across all 85 active
+  // during Isaias, Oct 2026), so the storm is the nearest active NHC system.
+  // A watch only goes up for a system that threatens the area, so nearest is
+  // right in practice; the distance cap stops a Hawaii alert (Central Pacific
+  // storms aren't in the feed) from linking to some far-off East Pacific one.
+  const TROPICAL_EVENT_RE =
+    /^(Tropical Storm|Hurricane|Typhoon|Storm Surge) (Watch|Warning)$/;
+  const TROPICAL_LINK_MAX_KM = 2500;
+  // NHC classification -> the short prefix shown in the link.
+  const STORM_PREFIX = {
+    HU: "Hurricane",
+    TS: "TS",
+    TD: "TD",
+    STS: "STS",
+    SS: "STS",
+    STD: "STD",
+    SD: "STD",
+    PTC: "PTC",
+  };
+  let alertsSeq = 0;
+
+  function isTropicalAlert(f) {
+    return TROPICAL_EVENT_RE.test((f.properties && f.properties.event) || "");
+  }
+
+  async function nearestStorm(lat, lon) {
+    const res = await fetch("/api/nhc/current");
+    if (!res.ok) throw new Error("nhc " + res.status);
+    const data = await res.json();
+    let best = null;
+    (data.activeStorms || []).forEach((s) => {
+      const d = distanceKm(lat, lon, Number(s.latitudeNumeric), Number(s.longitudeNumeric));
+      if (Number.isFinite(d) && d <= TROPICAL_LINK_MAX_KM && (!best || d < best.d)) {
+        best = { storm: s, d };
+      }
+    });
+    return best && best.storm;
+  }
+
+  function distanceKm(lat1, lon1, lat2, lon2) {
+    const rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad;
+    const dLon = (lon2 - lon1) * rad;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(a));
+  }
+
+  async function linkTropicalAlerts(features, lat, lon, seq) {
+    els.tropicsLink.classList.add("hidden");
+    if (!features.some(isTropicalAlert)) return;
+    let storm;
+    try {
+      storm = await nearestStorm(lat, lon);
+    } catch (_) {
+      return; // no link is fine; the alert itself is already shown
+    }
+    if (!storm || seq !== alertsSeq) return;
+    const id = String(storm.id || "").toLowerCase();
+    if (!/^[a-z]{2}\d{6}$/.test(id)) return;
+
+    const prefix = STORM_PREFIX[storm.classification] || storm.classification || "";
+    const label = (prefix ? prefix + " " : "") + (storm.name || "Storm") + " tracking";
+    const href = "/tropics?storm=" + id;
+
+    els.tropicsLink.textContent = label + " \u203a";
+    els.tropicsLink.href = href;
+    els.tropicsLink.classList.remove("hidden");
+
+    els.alertList.querySelectorAll(".alert-card[data-tropical]").forEach((card) => {
+      const a = document.createElement("a");
+      a.className = "alert-tropics";
+      a.href = href;
+      a.textContent = label + " \u203a";
+      card.appendChild(a);
+    });
   }
 
   function renderAlerts(features) {
@@ -1894,7 +1981,9 @@
         return (
           '<div class="alert-card sev-' +
           esc(sev) +
-          '">' +
+          '"' +
+          (isTropicalAlert(f) ? " data-tropical" : "") +
+          ">" +
           "<h3>" +
           esc(p.event || "Weather Alert") +
           "</h3>" +

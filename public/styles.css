@@ -211,6 +211,41 @@ button,
   color: #fff;
 }
 
+/* The tropics link hangs below the pill (absolute, so the top bar row keeps
+   its height and the title/buttons don't shift when it appears). */
+.alert-stack {
+  position: relative;
+  display: flex;
+}
+.tropics-link {
+  pointer-events: auto;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--shadow);
+  color: #93c5fd;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.tropics-link:active {
+  opacity: 0.7;
+}
+.tropics-link.hidden {
+  display: none;
+}
+
 /* --- Bottom controls ------------------------------------------------------ */
 
 .controls {
@@ -621,6 +656,16 @@ button,
   line-height: 1.45;
   color: #dbe3ef;
   white-space: pre-line;
+}
+.alert-card .alert-tropics {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-top: 4px;
+  color: #93c5fd;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
 }
 
 /* --- Settings sheet (radar products) -------------------------------------- */

@@ -113,6 +113,16 @@
   let refreshTimer;
   let storms = []; // last-loaded storm list
   let hasFramedView = false; // fit bounds once on first load; refresh keeps the view
+  // ?storm=<id> (e.g. the radar page's "TS Isaias tracking" link) frames that
+  // storm on first load instead of every active one.
+  const FOCUS_ID = (() => {
+    try {
+      const id = (new URLSearchParams(location.search).get("storm") || "").toLowerCase();
+      return /^[a-z]{2}\d{6}$/.test(id) ? id : null;
+    } catch (_) {
+      return null;
+    }
+  })();
 
   // --- Viewport height -----------------------------------------------------
 
@@ -238,6 +248,7 @@
     clearOverlayLayers();
 
     const bounds = L.latLngBounds([]);
+    const focusBounds = L.latLngBounds([]); // just the ?storm= system, if any
 
     if (!storms.length) {
       renderEmpty();
@@ -275,6 +286,7 @@
         .addTo(stormsLayer);
 
       bounds.extend([lat, lon]);
+      if (isFocus(s)) focusBounds.extend([lat, lon]);
     });
 
     renderStormList();
@@ -286,20 +298,28 @@
     // Frame once on first successful load. Refresh / auto-refresh / tab-focus
     // reloads keep whatever pan/zoom the user has.
     const shouldFrame = !hasFramedView;
-    if (shouldFrame && bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 6 });
+    const frame = () => (focusBounds.isValid() ? focusBounds : bounds);
+    if (shouldFrame && frame().isValid()) {
+      map.fitBounds(frame(), { padding: [60, 60], maxZoom: 6 });
     }
 
     // Model tracks + official GIS overlays in parallel; each may extend bounds.
+    // For the focused storm only the official track joins focusBounds: a
+    // stray model run can wander off across the Atlantic and zoom the view out
+    // to the whole basin, which is what focusing is meant to avoid.
     await Promise.all([
-      Promise.all(storms.map((s) => loadTracks(s, bounds))),
+      Promise.all(storms.map((s) => loadTracks(s, bounds, isFocus(s) ? focusBounds : null))),
       loadGis(bounds),
       loadDisturbances(bounds),
     ]);
-    if (shouldFrame && bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6 });
+    if (shouldFrame && frame().isValid()) {
+      map.fitBounds(frame(), { padding: [50, 50], maxZoom: 6 });
     }
     if (shouldFrame) hasFramedView = true;
+  }
+
+  function isFocus(s) {
+    return !!FOCUS_ID && String(s.id || "").toLowerCase() === FOCUS_ID;
   }
 
   function clearOverlayLayers() {
@@ -513,7 +533,7 @@
 
   // --- Load model guidance (a-deck GeoJSON) --------------------------------
 
-  async function loadTracks(storm, bounds) {
+  async function loadTracks(storm, bounds, officialBounds) {
     const id = String(storm.id || "").toLowerCase();
     if (!/^[a-z]{2}\d{6}$/.test(id)) return;
     let fc;
@@ -524,11 +544,12 @@
     } catch (_) {
       return; // tracks are a nice-to-have; markers already rendered
     }
-    addTrackFeatures(fc, bounds);
+    addTrackFeatures(fc, bounds, officialBounds);
   }
 
   // Draw one a-deck FeatureCollection (storm or invest) into the track layers.
-  function addTrackFeatures(fc, bounds) {
+  // officialBounds, if given, also collects just the official forecast track.
+  function addTrackFeatures(fc, bounds, officialBounds) {
     if (!fc || !fc.features || !fc.features.length) return;
 
     // Synoptic cycle the aids were initialized on (YYYYMMDDHH, UTC); combined
@@ -561,6 +582,9 @@
 
       const coords = feat.geometry && feat.geometry.coordinates;
       if (coords) coords.forEach(([lon, lat]) => bounds.extend([lat, lon]));
+      if (coords && p.official && officialBounds) {
+        coords.forEach(([lon, lat]) => officialBounds.extend([lat, lon]));
+      }
 
       // Drop forecast dots along the official and consensus tracks. Each has a
       // popup with its valid date/time (see addForecastPoints). Model spaghetti
