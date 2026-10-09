@@ -297,6 +297,36 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     sit *below* the map zoom. `drawTileLayer` therefore keys off
     `layer._tileZoom` and scales, rather than assuming tile z == map zoom —
     without that the share snapshot silently drops the overlay entirely.
+- **Wind (Open-Meteo)** — the **Wind** toggle (icon-only, SVG streaks) draws
+  animated particles drifting with the 10 m wind over whatever radar is
+  showing. Radar has no wind, and `api.weather.gov` only serves one gridpoint
+  per request, so the data is Open-Meteo's `current` wind (a 15-minute value,
+  CC-BY 4.0, credited in the Leaflet attribution and the share caption).
+  - `GET /api/wind/{s}/{bi}/{bj}` → one 6×6 **block** of a fixed global
+    lattice (`s` = spacing in degrees, from the `WIND_SPACINGS` allowlist; point
+    (r,c) is at `lat = -90 + (bi*6+r)*s`, `lon = -180 + (bj*6+c)*s`), as
+    `{ s, bi, bj, spd[36] (mph), dir[36] (degrees wind comes FROM) }`. Open-Meteo
+    bills every coordinate as an API call (free tier: 10k/day, non-commercial),
+    so the client never asks for "the viewport": fixed blocks make each URL
+    shareable across users and pans, edge-cached 15 min. Coordinates are derived
+    from the range-checked numbers, so nothing the client sent reaches the
+    upstream URL. Errors are 502 and uncached. Set the optional
+    **`OPEN_METEO_API_KEY`** Worker secret to use their paid endpoint
+    (`customer-api.open-meteo.com`) instead of the free one.
+  - Client (`app.js`, "Wind" section): spacing follows zoom
+    (`windSpacingFor`: 4° at z≤3 down to 0.25° at z≥8), wanted blocks are
+    fetched when the view settles (`moveend`), and wider-than-16-block views
+    just ask to zoom in. Wind is held as **u/v components** and interpolated
+    bilinearly, never as speed/direction, since compass angles don't average.
+    A coarse screen-space grid (`WIND_NODE_PX`) is rebuilt per view and the
+    particles sample that; Web Mercator keeps north up, so u is +x and v is -y.
+  - One `<canvas class="wind-canvas">` is appended to the map container (z 500,
+    `mix-blend-mode: screen`), not a tile layer, so it **pauses and clears on
+    `movestart`**: a canvas that doesn't pan with the tiles would show wind in
+    the wrong place. ~30 fps, particle count scales with screen area, and
+    `prefers-reduced-motion` gets one still frame of streaks. `shareView()`
+    draws the canvas with the same screen blend. It doesn't follow the radar
+    loop (wind is a current snapshot) and it stays out of Cache Storage.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES
@@ -442,13 +472,13 @@ Concretely, before you consider any UI change done:
   choice.
 - **Text controls get real padding and ≥14px type.** 12px labels crammed into a
   pill are unreadable at arm's length in daylight.
-- **The layer toggles in `<footer class="controls">` are icon-only by design.**
-  Clouds and Lightning are 44px square glyphs (`.btn.toggle.icon-only`) with an
-  `aria-label` carrying the name; dropping the words is what lets both layers,
-  Loop, Install and Refresh share one line down to 375px. Don't re-add the
-  labels, and keep the one labelled toggle on `flex: 1` (basis 0) — giving it a
-  percentage basis reserves more than the row has and bounces Install onto a
-  second line.
+- **The toggles in `<footer class="controls">` are icon-only by design.**
+  Clouds, Lightning, Wind and Loop are 44px square glyphs
+  (`.btn.toggle.icon-only`) with an `aria-label` carrying the name; dropping the
+  words is what lets all of them plus Install and Refresh share one line down
+  to 375px (`.toggles.wrap` spreads them with `space-between`). Don't re-add
+  the labels. A new toggle should be icon-only too: six 44px buttons plus gaps
+  is ~340px, so a seventh needs a new row or a home in the settings sheet.
 - **Don't crowd a row.** A message plus two buttons on one line collapses badly
   at 390px. Stack, wrap, or give the actions their own full-width row.
 - **Respect the safe-area insets** (`env(safe-area-inset-*)`), the `100dvh`

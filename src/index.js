@@ -8,6 +8,7 @@
  *   - /api/mrms/*   — NCEP's MRMS mosaic WMS re-served as {z}/{x}/{y} tiles
  *   - /api/site/*   — the same, for an individual radar site (NEXRAD / TDWR)
  *   - /api/glm/*    — GOES GLM lightning (flash extent density) tiles
+ *   - /api/wind/*   — surface wind blocks (Open-Meteo) for the wind overlay
  *   - /api/legend/* — GeoServer legend images for the single-site products
  *
  * Why proxy instead of calling these straight from the browser:
@@ -167,6 +168,10 @@ export default {
 
     if (pathname.startsWith("/api/glm/")) {
       return handleGLM(request, url);
+    }
+
+    if (pathname.startsWith("/api/wind/")) {
+      return handleWind(request, url, env);
     }
 
     if (pathname.startsWith("/api/legend/")) {
@@ -1008,6 +1013,105 @@ function tileBBox3857(z, x, y) {
   const minx = -WEB_MERCATOR_MAX + x * span;
   const maxy = WEB_MERCATOR_MAX - y * span;
   return [minx, maxy - span, minx + span, maxy];
+}
+
+// Wind (/api/wind/*) — current 10 m wind from Open-Meteo, for the animated
+// wind overlay. Open-Meteo takes many coordinates per request but bills each
+// one as an API call, so the client never asks for "the viewport". It asks for
+// fixed BLOCKS of a global lattice, which makes every URL shareable across
+// users and pans (one edge-cache entry serves everyone looking at that area):
+//
+//   GET /api/wind/{s}/{bi}/{bj}
+//     s      lattice spacing in degrees (WIND_SPACINGS allowlist)
+//     bi,bj  block row (south->north) and column (west->east); the block holds
+//            WIND_BLOCK x WIND_BLOCK points, point (r,c) sitting at
+//            lat = -90 + (bi*6 + r)*s, lon = -180 + (bj*6 + c)*s
+//   -> { s, bi, bj, spd: [36 mph|null], dir: [36 deg-from|null] }, row-major
+//
+// s/bi/bj are parsed numbers range-checked here, and the outbound coordinates
+// are computed from them, so nothing the client typed reaches the upstream URL.
+// Open-Meteo's free tier is non-commercial; set the optional OPEN_METEO_API_KEY
+// secret to use their paid endpoint instead.
+const WIND_SPACINGS = [0.25, 0.5, 1, 2, 4];
+const WIND_BLOCK = 6;
+const WIND_TTL_S = 900; // Open-Meteo "current" is a 15-minute value
+
+async function handleWind(request, url, env) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const m = /^\/api\/wind\/([0-9.]+)\/(\d{1,4})\/(\d{1,4})$/.exec(url.pathname);
+  const s = m ? Number(m[1]) : NaN;
+  const bi = m ? Number(m[2]) : NaN;
+  const bj = m ? Number(m[3]) : NaN;
+  // Last real lattice index is 180/s (lat) or 360/s (lon); +1 leaves room for
+  // the interpolation corner just past the pole / antimeridian.
+  if (
+    !WIND_SPACINGS.includes(s) ||
+    bi > Math.floor((180 / s + 1) / WIND_BLOCK) ||
+    bj > Math.floor((360 / s + 1) / WIND_BLOCK)
+  ) {
+    return json({ error: "Bad wind block" }, 400);
+  }
+
+  const lats = [];
+  const lons = [];
+  for (let r = 0; r < WIND_BLOCK; r++) {
+    for (let c = 0; c < WIND_BLOCK; c++) {
+      const lat = Math.min(90, -90 + (bi * WIND_BLOCK + r) * s);
+      let lon = -180 + (bj * WIND_BLOCK + c) * s;
+      if (lon > 180) lon -= 360;
+      lats.push(+lat.toFixed(4));
+      lons.push(+lon.toFixed(4));
+    }
+  }
+
+  const host = env && env.OPEN_METEO_API_KEY
+    ? "https://customer-api.open-meteo.com"
+    : "https://api.open-meteo.com";
+  const q =
+    `latitude=${lats.join(",")}&longitude=${lons.join(",")}` +
+    "&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=mph" +
+    (env && env.OPEN_METEO_API_KEY
+      ? "&apikey=" + encodeURIComponent(env.OPEN_METEO_API_KEY)
+      : "");
+
+  let upstream;
+  try {
+    upstream = await fetch(`${host}/v1/forecast?${q}`, {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+      cf: { cacheTtl: WIND_TTL_S, cacheEverything: true },
+    });
+  } catch (e) {
+    return json({ error: "Wind upstream unreachable" }, 502);
+  }
+  if (!upstream.ok) {
+    // Covers Open-Meteo's 429 (daily quota). Not cached, so recovery is instant.
+    return json({ error: "Wind upstream error", status: upstream.status }, 502);
+  }
+
+  let data;
+  try {
+    data = await upstream.json();
+  } catch (e) {
+    return json({ error: "Wind upstream sent bad JSON" }, 502);
+  }
+  const list = Array.isArray(data) ? data : [data];
+  if (list.length !== lats.length) {
+    return json({ error: "Wind upstream returned the wrong point count" }, 502);
+  }
+  const num = (v) => (typeof v === "number" && isFinite(v) ? +v.toFixed(1) : null);
+  return json(
+    {
+      s,
+      bi,
+      bj,
+      spd: list.map((p) => num(p && p.current && p.current.wind_speed_10m)),
+      dir: list.map((p) => num(p && p.current && p.current.wind_direction_10m)),
+    },
+    200,
+    WIND_TTL_S
+  );
 }
 
 function json(obj, status = 200, cacheSeconds = 0) {

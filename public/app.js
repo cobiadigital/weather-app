@@ -163,6 +163,32 @@
   const GLM_ATTRIBUTION =
     'Lightning: <a href="https://www.nesdis.noaa.gov/our-satellites/currently-flying/goes-east-west/geostationary-lightning-mapper-glm">NOAA GOES GLM</a> via <a href="https://realearth.ssec.wisc.edu/">SSEC RealEarth</a>';
 
+  // Wind (Open-Meteo, via our Worker's /api/wind/* — see src/index.js). The
+  // Worker serves fixed WIND_BLOCK x WIND_BLOCK blocks of a global lattice so
+  // every URL is shareable across users; this must match its WIND_BLOCK.
+  const WIND_BLOCK = 6;
+  const WIND_TTL_MS = 15 * 60 * 1000; // Open-Meteo "current" is a 15-min value
+  const WIND_RECHECK_MS = 5 * 60 * 1000; // beat that re-fetches expired blocks
+  const WIND_MAX_FETCH = 16; // blocks per view; wider than this asks to zoom in
+  const WIND_KEEP_BLOCKS = 48; // blocks held in memory before the oldest go
+  const WIND_NODE_PX = 16; // screen-space field resolution (particles sample it)
+  const WIND_PX_PER_MPH = 0.1; // drift per frame; 20 mph = 2 px
+  const WIND_MAX_STEP_PX = 4;
+  const WIND_FADE = 0.1; // how fast trails dissolve (higher = shorter)
+  const WIND_FRAME_MS = 32; // ~30 fps; plenty for a drifting streak, easy on battery
+  const WIND_AREA_PER_PARTICLE = 900; // px² of screen per particle
+  // Upper speed bound (mph) and streak colour for each band. Pale, light
+  // colours on purpose: the layer screen-blends over the radar.
+  const WIND_BANDS = [
+    [10, "#9fd8ff"],
+    [20, "#e6f4ff"],
+    [30, "#fff3a6"],
+    [45, "#ffc27a"],
+    [Infinity, "#ff9ad5"],
+  ];
+  const WIND_ATTRIBUTION =
+    'Wind: <a href="https://open-meteo.com/">Open-Meteo</a>';
+
   // MRMS (via our Worker). The tile template carries {layer} (which MRMS
   // product — see RADAR_PRODUCTS' mrmsLayer) and {t} (the frame time both the
   // live layer and the loop pin to — identical URLs => Cache Storage hits).
@@ -328,6 +354,7 @@
     alertClose: document.getElementById("alertClose"),
     cloudsBtn: document.getElementById("cloudsBtn"),
     lightningBtn: document.getElementById("lightningBtn"),
+    windBtn: document.getElementById("windBtn"),
     loopBtn: document.getElementById("loopBtn"),
     shareBtn: document.getElementById("shareBtn"),
     settingsBtn: document.getElementById("settingsBtn"),
@@ -367,6 +394,7 @@
   let cloudLayer; // GOES satellite cloud layer (optional)
   let lightningLayer; // GOES GLM lightning overlay (optional)
   let lightningTimer; // 1-minute frame follower, only while the overlay is on
+  let windOn = false; // animated wind overlay (Open-Meteo), see the Wind section
   let meMarker;
   let refreshTimer;
   let lastRefreshAt = 0; // Date.now() of the last actual radar refresh
@@ -1649,6 +1677,7 @@
     // be several frames behind on return. It's independent of the loop, hence
     // ahead of that early return.
     if (lightningLayer) refreshLightning();
+    if (windOn) refreshWind();
     if (loopOn) return; // the loop drives its own frames
     if (Date.now() - lastRefreshAt >= STALE_REFRESH_MS) refreshRadar(false);
   }
@@ -2174,6 +2203,386 @@
   // framesByKey memo. Its own key, since GLM updates on its own schedule.
   function glmSource() {
     return { key: "glm_" + GLM_PRODUCT, frames: GLM_FRAMES_URL };
+  }
+
+  // --- Wind (Open-Meteo) overlay -------------------------------------------
+
+  // Animated streaks drifting with the 10 m wind. Not a tile layer: one
+  // <canvas> sits over the whole map and is rebuilt when the view settles.
+  //
+  // Data: /api/wind/{s}/{bi}/{bj} returns a 6x6 block of a fixed global
+  // lattice (see the Worker), so many users and pans share each cache entry.
+  // The lattice spacing follows zoom (windSpacingFor) so a screen always spans
+  // a similar number of points. Wind is stored as u/v components, never as
+  // speed/direction, because components interpolate and compass angles don't
+  // (350° and 10° average to 180°, not 0°).
+  //
+  // Drawing: a coarse screen-space grid of u/v (WIND_NODE_PX) is rebuilt from
+  // the lattice after every pan/zoom, and the particles sample that. Web
+  // Mercator keeps north up everywhere, so u is +x and v is -y with no
+  // projection maths. Particle speed is screen-space, so it stays constant as
+  // you zoom. Everything pauses and clears while the map moves, because a
+  // canvas that doesn't pan with the tiles would just lie.
+  let windCanvas = null;
+  let windCtx = null;
+  let windW = 0;
+  let windH = 0;
+  let windField = null; // { cols, rows, u, v } in screen space, or null
+  let windParticles = [];
+  let windRaf = 0;
+  let windLast = 0;
+  let windTimer = null;
+  let windSeq = 0; // bumps on every move/refresh so stale async work bows out
+  let windWarned = false; // one "unavailable" status per outage, not per pan
+  const windBlocks = new Map(); // "s:bi:bj" -> { at, u, v } (Float32Array x36)
+  const windInflight = new Map(); // "s:bi:bj" -> Promise
+  const windBuckets = WIND_BANDS.map(() => []);
+  const windTmp = [0, 0];
+
+  function windSpacingFor(z) {
+    if (z <= 3) return 4;
+    if (z === 4) return 2;
+    if (z === 5) return 1;
+    if (z <= 7) return 0.5;
+    return 0.25;
+  }
+
+  // Blocks covering the (slightly padded) view, or null if there'd be too many.
+  function windWantedBlocks(s) {
+    const b = map.getBounds().pad(0.15);
+    const clampLat = (v) => Math.max(-85.06, Math.min(85.06, v));
+    const clampLon = (v) => Math.max(-180, Math.min(180, v));
+    const i0 = Math.floor((clampLat(b.getSouth()) + 90) / s);
+    const i1 = Math.ceil((clampLat(b.getNorth()) + 90) / s);
+    const j0 = Math.floor((clampLon(b.getWest()) + 180) / s);
+    const j1 = Math.ceil((clampLon(b.getEast()) + 180) / s);
+    const out = [];
+    for (let bi = Math.floor(i0 / WIND_BLOCK); bi <= Math.floor(i1 / WIND_BLOCK); bi++) {
+      for (let bj = Math.floor(j0 / WIND_BLOCK); bj <= Math.floor(j1 / WIND_BLOCK); bj++) {
+        out.push({ key: s + ":" + bi + ":" + bj, s, bi, bj });
+        if (out.length > WIND_MAX_FETCH) return null;
+      }
+    }
+    return out;
+  }
+
+  function fetchWindBlock(w) {
+    if (windInflight.has(w.key)) return windInflight.get(w.key);
+    const p = fetch("/api/wind/" + w.s + "/" + w.bi + "/" + w.bj)
+      .then((r) => {
+        if (!r.ok) throw new Error("wind " + r.status);
+        return r.json();
+      })
+      .then((d) => {
+        const n = WIND_BLOCK * WIND_BLOCK;
+        if (!d || !Array.isArray(d.spd) || !Array.isArray(d.dir) || d.spd.length !== n || d.dir.length !== n) {
+          throw new Error("bad wind block");
+        }
+        const u = new Float32Array(n);
+        const v = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          const sp = d.spd[i];
+          const dr = d.dir[i];
+          if (typeof sp !== "number" || typeof dr !== "number") {
+            u[i] = v[i] = NaN;
+          } else {
+            // Direction is where the wind comes FROM: from the west (270°)
+            // blows toward +x, from the south (180°) toward +y (north).
+            const rad = (dr * Math.PI) / 180;
+            u[i] = -sp * Math.sin(rad);
+            v[i] = -sp * Math.cos(rad);
+          }
+        }
+        windBlocks.set(w.key, { at: Date.now(), u, v });
+        return true;
+      })
+      .catch(() => false)
+      .finally(() => windInflight.delete(w.key));
+    windInflight.set(w.key, p);
+    return p;
+  }
+
+  // Bilinear u/v at a lat/lon from the lattice. False if any of the four
+  // corners is missing (block not loaded, or Open-Meteo had no value there).
+  function windSample(s, lat, lon, out) {
+    const fi = (lat + 90) / s;
+    const fj = (lon + 180) / s;
+    const i0 = Math.floor(fi);
+    const j0 = Math.floor(fj);
+    const ty = fi - i0;
+    const tx = fj - j0;
+    let su = 0;
+    let sv = 0;
+    for (let di = 0; di < 2; di++) {
+      for (let dj = 0; dj < 2; dj++) {
+        const il = i0 + di;
+        const jl = j0 + dj;
+        const bi = Math.floor(il / WIND_BLOCK);
+        const bj = Math.floor(jl / WIND_BLOCK);
+        const blk = windBlocks.get(s + ":" + bi + ":" + bj);
+        if (!blk) return false;
+        const k = (il - bi * WIND_BLOCK) * WIND_BLOCK + (jl - bj * WIND_BLOCK);
+        const u = blk.u[k];
+        if (u !== u) return false; // NaN
+        const wgt = (di ? ty : 1 - ty) * (dj ? tx : 1 - tx);
+        su += u * wgt;
+        sv += blk.v[k] * wgt;
+      }
+    }
+    out[0] = su;
+    out[1] = sv;
+    return true;
+  }
+
+  // Resample the lattice onto a coarse screen grid for the current view.
+  function buildWindField() {
+    const size = map.getSize();
+    const s = windSpacingFor(map.getZoom());
+    const cols = Math.ceil(size.x / WIND_NODE_PX) + 1;
+    const rows = Math.ceil(size.y / WIND_NODE_PX) + 1;
+    const u = new Float32Array(cols * rows);
+    const v = new Float32Array(cols * rows);
+    let any = false;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const ll = map.containerPointToLatLng([c * WIND_NODE_PX, r * WIND_NODE_PX]);
+        const ok = windSample(s, ll.lat, ll.lng, windTmp);
+        u[r * cols + c] = ok ? windTmp[0] : NaN;
+        v[r * cols + c] = ok ? windTmp[1] : NaN;
+        if (ok) any = true;
+      }
+    }
+    windField = any ? { cols, rows, u, v } : null;
+  }
+
+  // Bilinear u/v at a screen pixel from the field. False off the grid or over
+  // a hole, which respawns the particle somewhere it can move.
+  function windFieldAt(x, y, out) {
+    const f = windField;
+    if (!f) return false;
+    const fx = x / WIND_NODE_PX;
+    const fy = y / WIND_NODE_PX;
+    const c0 = Math.floor(fx);
+    const r0 = Math.floor(fy);
+    if (c0 < 0 || r0 < 0 || c0 >= f.cols - 1 || r0 >= f.rows - 1) return false;
+    const tx = fx - c0;
+    const ty = fy - r0;
+    const a = r0 * f.cols + c0;
+    const b = a + 1;
+    const c = a + f.cols;
+    const d = c + 1;
+    const u = f.u;
+    const v = f.v;
+    const ua = u[a] * (1 - tx) * (1 - ty) + u[b] * tx * (1 - ty) + u[c] * (1 - tx) * ty + u[d] * tx * ty;
+    if (ua !== ua) return false;
+    out[0] = ua;
+    out[1] = v[a] * (1 - tx) * (1 - ty) + v[b] * tx * (1 - ty) + v[c] * (1 - tx) * ty + v[d] * tx * ty;
+    return true;
+  }
+
+  function respawnWind(p, stagger) {
+    p.x = Math.random() * windW;
+    p.y = Math.random() * windH;
+    p.max = 40 + Math.random() * 60;
+    p.age = stagger ? Math.random() * p.max : 0;
+  }
+
+  function windStep(fade) {
+    const ctx = windCtx;
+    if (fade) {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.fillStyle = "rgba(0,0,0," + WIND_FADE + ")";
+      ctx.fillRect(0, 0, windW, windH);
+      ctx.globalCompositeOperation = "source-over";
+    }
+    for (const b of windBuckets) b.length = 0;
+    for (const p of windParticles) {
+      if (++p.age > p.max || !windFieldAt(p.x, p.y, windTmp)) {
+        respawnWind(p, false);
+        continue;
+      }
+      const u = windTmp[0];
+      const v = windTmp[1];
+      const sp = Math.hypot(u, v);
+      const k = sp > 0 ? Math.min(sp * WIND_PX_PER_MPH, WIND_MAX_STEP_PX) / sp : 0;
+      const nx = p.x + u * k;
+      const ny = p.y - v * k;
+      let band = 0;
+      while (sp > WIND_BANDS[band][0]) band++;
+      windBuckets[band].push(p.x, p.y, nx, ny);
+      p.x = nx;
+      p.y = ny;
+    }
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = "round";
+    ctx.globalAlpha = 0.9;
+    for (let i = 0; i < windBuckets.length; i++) {
+      const seg = windBuckets[i];
+      if (!seg.length) continue;
+      ctx.beginPath();
+      for (let j = 0; j < seg.length; j += 4) {
+        ctx.moveTo(seg[j], seg[j + 1]);
+        ctx.lineTo(seg[j + 2], seg[j + 3]);
+      }
+      ctx.strokeStyle = WIND_BANDS[i][1];
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function windFrame(t) {
+    windRaf = requestAnimationFrame(windFrame);
+    if (t - windLast < WIND_FRAME_MS) return;
+    windLast = t;
+    windStep(true);
+  }
+
+  function stopWindAnim() {
+    if (windRaf) cancelAnimationFrame(windRaf);
+    windRaf = 0;
+  }
+
+  function clearWindCanvas() {
+    if (windCtx) windCtx.clearRect(0, 0, windW, windH);
+  }
+
+  function startWindAnim() {
+    stopWindAnim();
+    clearWindCanvas();
+    if (!windField) return;
+    const n = Math.max(200, Math.min(1200, Math.round((windW * windH) / WIND_AREA_PER_PARTICLE)));
+    windParticles = [];
+    for (let i = 0; i < n; i++) {
+      const p = { x: 0, y: 0, age: 0, max: 1 };
+      respawnWind(p, true);
+      windParticles.push(p);
+    }
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      // No motion: paint one still frame of streaks and stop.
+      for (let i = 0; i < 24; i++) windStep(false);
+      return;
+    }
+    windRaf = requestAnimationFrame(windFrame);
+  }
+
+  function sizeWindCanvas() {
+    const size = map.getSize();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    windW = size.x;
+    windH = size.y;
+    windCanvas.width = Math.round(size.x * dpr);
+    windCanvas.height = Math.round(size.y * dpr);
+    windCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // Fetch whatever the view needs that we don't hold (or that has expired),
+  // then rebuild the field and (re)start the animation. Safe to call often:
+  // blocks are only re-fetched past their TTL, and a newer call supersedes an
+  // older one still awaiting the network.
+  async function refreshWind() {
+    if (!windOn) return;
+    const seq = ++windSeq;
+    const s = windSpacingFor(map.getZoom());
+    const wanted = windWantedBlocks(s);
+    if (!wanted) {
+      windField = null;
+      stopWindAnim();
+      clearWindCanvas();
+      setStatus("Zoom in to see wind.");
+      return;
+    }
+    const now = Date.now();
+    const need = wanted.filter((w) => {
+      const b = windBlocks.get(w.key);
+      return !b || now - b.at > WIND_TTL_MS;
+    });
+    if (need.length) {
+      const results = await Promise.all(need.map(fetchWindBlock));
+      if (seq !== windSeq || !windOn) return; // the view moved on, or wind was switched off
+      const failed = results.filter((ok) => !ok).length;
+      if (failed && failed === need.length && !wanted.some((w) => windBlocks.has(w.key))) {
+        if (!windWarned) setStatus("Wind data is unavailable right now.");
+        windWarned = true;
+        return;
+      }
+      windWarned = false;
+    }
+    // Keep memory bounded: Map iterates in insertion order, so the head is the
+    // oldest fetch. Anything the current view needs was just (re)inserted or is
+    // fresh, so drop from the front but never a wanted key.
+    if (windBlocks.size > WIND_KEEP_BLOCKS) {
+      const keep = new Set(wanted.map((w) => w.key));
+      for (const k of windBlocks.keys()) {
+        if (windBlocks.size <= WIND_KEEP_BLOCKS) break;
+        if (!keep.has(k)) windBlocks.delete(k);
+      }
+    }
+    const hadField = !!windField && !!windRaf;
+    buildWindField();
+    // A background re-check (field already running and still valid) swaps the
+    // data under the live particles without restarting them.
+    if (hadField && windField) return;
+    startWindAnim();
+  }
+
+  function onWindMoveStart() {
+    windSeq++; // cancel any refresh still waiting on the network
+    windField = null;
+    stopWindAnim();
+    clearWindCanvas();
+  }
+
+  function onWindMoveEnd() {
+    // Force a restart: the field belongs to the old view.
+    windField = null;
+    refreshWind();
+  }
+
+  function onWindResize() {
+    sizeWindCanvas();
+    onWindMoveEnd();
+  }
+
+  function toggleWind() {
+    if (windOn) {
+      stopWind();
+      setStatus("Wind off.");
+      return;
+    }
+    windOn = true;
+    setToggle(els.windBtn, true);
+    windCanvas = document.createElement("canvas");
+    windCanvas.className = "wind-canvas";
+    windCtx = windCanvas.getContext("2d");
+    map.getContainer().appendChild(windCanvas);
+    sizeWindCanvas();
+    map.on("movestart", onWindMoveStart);
+    map.on("moveend", onWindMoveEnd);
+    map.on("resize", onWindResize);
+    if (map.attributionControl) map.attributionControl.addAttribution(WIND_ATTRIBUTION);
+    setStatus("Wind (Open-Meteo) on.");
+    clearInterval(windTimer);
+    windTimer = setInterval(refreshWind, WIND_RECHECK_MS);
+    refreshWind();
+  }
+
+  function stopWind() {
+    windOn = false;
+    windSeq++;
+    clearInterval(windTimer);
+    windTimer = null;
+    stopWindAnim();
+    map.off("movestart", onWindMoveStart);
+    map.off("moveend", onWindMoveEnd);
+    map.off("resize", onWindResize);
+    if (map.attributionControl) map.attributionControl.removeAttribution(WIND_ATTRIBUTION);
+    if (windCanvas && windCanvas.parentNode) windCanvas.parentNode.removeChild(windCanvas);
+    windCanvas = null;
+    windCtx = null;
+    windField = null;
+    windParticles = [];
+    windWarned = false;
+    setToggle(els.windBtn, false);
   }
 
   // --- "firefly": re-render the FED raster as graduated points of light ----
@@ -2935,6 +3344,15 @@
       drawTileLayer(ctx, radarLayer, zoom, origin);
     }
     if (lightningLayer) drawTileLayer(ctx, lightningLayer, zoom, origin);
+    // The wind canvas is already a picture of the current view (its own
+    // streaks, in CSS px), so it only needs the same screen blend it has live.
+    if (windOn && windCanvas) {
+      ctx.save();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "screen";
+      ctx.drawImage(windCanvas, 0, 0, size.x, size.y);
+      ctx.restore();
+    }
 
     if (meMarker) {
       const p = map.latLngToContainerPoint(meMarker.getLatLng());
@@ -3027,6 +3445,7 @@
     ctx.font = "400 10px " + font;
     const credits = ["Radar: NWS NEXRAD / IEM"];
     if (lightningLayer) credits.push("Lightning: GOES GLM / SSEC RealEarth");
+    if (windOn) credits.push("Wind: Open-Meteo");
     credits.push("© OpenStreetMap, © CARTO");
     const sep = "  ·  ";
     const creditLines = [];
@@ -3137,6 +3556,7 @@
     els.alertClose.addEventListener("click", closeSheet);
     els.cloudsBtn.addEventListener("click", toggleClouds);
     els.lightningBtn.addEventListener("click", toggleLightning);
+    els.windBtn.addEventListener("click", toggleWind);
     els.loopBtn.addEventListener("click", toggleLoop);
     els.shareBtn.addEventListener("click", shareView);
     els.settingsBtn.addEventListener("click", toggleSettingsSheet);
