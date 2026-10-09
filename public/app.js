@@ -478,9 +478,10 @@
   //    874px screen. Sizing to innerHeight then leaves that ~60px as a blank
   //    strip along the bottom and floats the controls up. screen.height is the
   //    true drawable height here; the app is portrait-locked so it's stable.
-  //  - Safari (and everything else): innerHeight is correct — the difference
-  //    from screen.height there is the real browser toolbars, which we must not
-  //    draw under. So we keep innerHeight.
+  //  - Safari, Android (including its installed PWA) and everything else:
+  //    innerHeight is correct — the difference from screen.height there is the
+  //    real browser toolbars / system bars, which we must not draw under. So we
+  //    keep innerHeight.
   //
   // Re-measure whenever the height can change (see the listeners below).
   function isStandalone() {
@@ -491,7 +492,11 @@
     );
   }
   function measuredViewportHeight() {
-    if (isStandalone() && window.screen && screen.height) {
+    // The screen.height trick is iOS-only (navigator.standalone exists only
+    // there). Android's installed PWA sizes innerHeight correctly, but its
+    // screen.height includes the status and gesture bars, so using it there
+    // makes body taller than the window and pushes the controls off the bottom.
+    if (window.navigator.standalone === true && window.screen && screen.height) {
       // Guard with max so we never end up shorter than innerHeight.
       return Math.max(window.innerHeight, screen.height);
     }
