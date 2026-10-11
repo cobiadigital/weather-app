@@ -308,7 +308,10 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     `{ s, bi, bj, t, spd[36] (mph), dir[36] (degrees wind comes FROM) }`, where `t` is the
     unix time the values are *for* (Open-Meteo's `current.time`, via
     `timeformat=unixtime`). The app shows the oldest `t` on screen as "Wind as of
-    3:45 PM (12 min ago)" in the status line and the share caption. Open-Meteo
+    3:45 PM (12 min ago)" in the status line (and the share caption), and shows
+    "Loading wind…" there until the first blocks land. That note rides on the
+    end of whatever the radar last said (`windStatus`, appended in
+    `renderStatus()`), so the radar's 5-minute "updated" messages don't wipe it. Open-Meteo
     bills every coordinate as an API call (free tier: 10k/day, non-commercial),
     so the client never asks for "the viewport": fixed blocks make each URL
     shareable across users and pans, edge-cached 15 min. Coordinates are derived

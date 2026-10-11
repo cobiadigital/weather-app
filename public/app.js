@@ -2238,7 +2238,6 @@
   let windLast = 0;
   let windTimer = null;
   let windSeq = 0; // bumps on every move/refresh so stale async work bows out
-  let windWarned = false; // one "unavailable" status per outage, not per pan
   const windBlocks = new Map(); // "s:bi:bj" -> { at, u, v } (Float32Array x36)
   const windInflight = new Map(); // "s:bi:bj" -> Promise
   const windBuckets = WIND_BANDS.map(() => []);
@@ -2500,7 +2499,7 @@
       windField = null;
       stopWindAnim();
       clearWindCanvas();
-      setStatus("Zoom in to see wind.");
+      setWindStatus("Zoom in to see wind");
       return;
     }
     const now = Date.now();
@@ -2509,15 +2508,14 @@
       return !b || now - b.at > WIND_TTL_MS;
     });
     if (need.length) {
+      setWindStatus("Loading wind…");
       const results = await Promise.all(need.map(fetchWindBlock));
       if (seq !== windSeq || !windOn) return; // the view moved on, or wind was switched off
       const failed = results.filter((ok) => !ok).length;
       if (failed && failed === need.length && !wanted.some((w) => windBlocks.has(w.key))) {
-        if (!windWarned) setStatus("Wind data is unavailable right now.");
-        windWarned = true;
+        setWindStatus("Wind unavailable");
         return;
       }
-      windWarned = false;
     }
     // Keep memory bounded: Map iterates in insertion order, so the head is the
     // oldest fetch. Anything the current view needs was just (re)inserted or is
@@ -2531,12 +2529,10 @@
     }
     const hadField = !!windField && !!windRaf;
     buildWindField();
-    // Say how old the data is when it's new to the screen (first load or a
-    // TTL refresh), not on every pan, so it doesn't drown other status text.
-    if (need.length && windField) {
-      const label = windAsOfLabel();
-      if (label) setStatus("Wind as of " + label + ".");
-    }
+    // Always say how old the data is (the minutes tick over on the 5-minute
+    // re-check), replacing "Loading wind…".
+    const label = windAsOfLabel();
+    setWindStatus(label ? "Wind as of " + label : "");
     // A background re-check (field already running and still valid) swaps the
     // data under the live particles without restarting them.
     if (hadField && windField) return;
@@ -2601,7 +2597,7 @@
     map.on("moveend", onWindMoveEnd);
     map.on("resize", onWindResize);
     if (map.attributionControl) map.attributionControl.addAttribution(WIND_ATTRIBUTION);
-    setStatus("Loading wind…");
+    setWindStatus("Loading wind…");
     clearInterval(windTimer);
     windTimer = setInterval(refreshWind, WIND_RECHECK_MS);
     refreshWind();
@@ -2622,7 +2618,7 @@
     windCtx = null;
     windField = null;
     windParticles = [];
-    windWarned = false;
+    windStatus = "";
     setToggle(els.windBtn, false);
   }
 
@@ -3563,9 +3559,25 @@
 
   // --- Helpers -------------------------------------------------------------
 
+  // The wind overlay keeps its own "Loading wind…" / "Wind as of …" note on the
+  // end of whatever the radar last said, so the radar's 5-minute "updated"
+  // messages don't wipe it. See setWindStatus().
+  let statusBase = "";
+  let statusIsError = false;
+  let windStatus = "";
+  function renderStatus() {
+    const suffix = windOn && windStatus && !statusIsError ? " · " + windStatus : "";
+    els.status.textContent = statusBase + suffix;
+    els.status.classList.toggle("error", statusIsError);
+  }
   function setStatus(msg, isError) {
-    els.status.textContent = msg;
-    els.status.classList.toggle("error", !!isError);
+    statusBase = msg;
+    statusIsError = !!isError;
+    renderStatus();
+  }
+  function setWindStatus(text) {
+    windStatus = text;
+    renderStatus();
   }
 
   function timeNow() {
