@@ -478,9 +478,10 @@
   //    874px screen. Sizing to innerHeight then leaves that ~60px as a blank
   //    strip along the bottom and floats the controls up. screen.height is the
   //    true drawable height here; the app is portrait-locked so it's stable.
-  //  - Safari (and everything else): innerHeight is correct — the difference
-  //    from screen.height there is the real browser toolbars, which we must not
-  //    draw under. So we keep innerHeight.
+  //  - Safari, Android (including its installed PWA) and everything else:
+  //    innerHeight is correct — the difference from screen.height there is the
+  //    real browser toolbars / system bars, which we must not draw under. So we
+  //    keep innerHeight.
   //
   // Re-measure whenever the height can change (see the listeners below).
   function isStandalone() {
@@ -491,7 +492,11 @@
     );
   }
   function measuredViewportHeight() {
-    if (isStandalone() && window.screen && screen.height) {
+    // The screen.height trick is iOS-only (navigator.standalone exists only
+    // there). Android's installed PWA sizes innerHeight correctly, but its
+    // screen.height includes the status and gesture bars, so using it there
+    // makes body taller than the window and pushes the controls off the bottom.
+    if (window.navigator.standalone === true && window.screen && screen.height) {
       // Guard with max so we never end up shorter than innerHeight.
       return Math.max(window.innerHeight, screen.height);
     }
@@ -2233,7 +2238,6 @@
   let windLast = 0;
   let windTimer = null;
   let windSeq = 0; // bumps on every move/refresh so stale async work bows out
-  let windWarned = false; // one "unavailable" status per outage, not per pan
   const windBlocks = new Map(); // "s:bi:bj" -> { at, u, v } (Float32Array x36)
   const windInflight = new Map(); // "s:bi:bj" -> Promise
   const windBuckets = WIND_BANDS.map(() => []);
@@ -2293,7 +2297,14 @@
             v[i] = -sp * Math.cos(rad);
           }
         }
-        windBlocks.set(w.key, { at: Date.now(), u, v });
+        // `for` is when the values are valid (the model step), not when we
+        // fetched them: that's the age worth showing.
+        windBlocks.set(w.key, {
+          at: Date.now(),
+          for: typeof d.t === "number" ? d.t * 1000 : null,
+          u,
+          v,
+        });
         return true;
       })
       .catch(() => false)
@@ -2488,7 +2499,7 @@
       windField = null;
       stopWindAnim();
       clearWindCanvas();
-      setStatus("Zoom in to see wind.");
+      setWindStatus("Zoom in to see wind");
       return;
     }
     const now = Date.now();
@@ -2497,15 +2508,14 @@
       return !b || now - b.at > WIND_TTL_MS;
     });
     if (need.length) {
+      setWindStatus("Loading wind…");
       const results = await Promise.all(need.map(fetchWindBlock));
       if (seq !== windSeq || !windOn) return; // the view moved on, or wind was switched off
       const failed = results.filter((ok) => !ok).length;
       if (failed && failed === need.length && !wanted.some((w) => windBlocks.has(w.key))) {
-        if (!windWarned) setStatus("Wind data is unavailable right now.");
-        windWarned = true;
+        setWindStatus("Wind unavailable");
         return;
       }
-      windWarned = false;
     }
     // Keep memory bounded: Map iterates in insertion order, so the head is the
     // oldest fetch. Anything the current view needs was just (re)inserted or is
@@ -2519,10 +2529,37 @@
     }
     const hadField = !!windField && !!windRaf;
     buildWindField();
+    // Always say how old the data is (the minutes tick over on the 5-minute
+    // re-check), replacing "Loading wind…".
+    const label = windAsOfLabel();
+    setWindStatus(label ? "Wind as of " + label : "");
     // A background re-check (field already running and still valid) swaps the
     // data under the live particles without restarting them.
     if (hadField && windField) return;
     startWindAnim();
+  }
+
+  // Oldest valid-time among the blocks on screen (the honest "as of"), or null.
+  function windAsOf() {
+    if (!windOn) return null;
+    const wanted = windWantedBlocks(windSpacingFor(map.getZoom())) || [];
+    let t = null;
+    for (const w of wanted) {
+      const b = windBlocks.get(w.key);
+      if (b && b.for && (t === null || b.for < t)) t = b.for;
+    }
+    return t;
+  }
+
+  function windAsOfLabel() {
+    const t = windAsOf();
+    if (t === null) return "";
+    const clock = new Date(t).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+    return clock + " (" + (mins < 1 ? "just now" : mins + " min ago") + ")";
   }
 
   function onWindMoveStart() {
@@ -2560,7 +2597,7 @@
     map.on("moveend", onWindMoveEnd);
     map.on("resize", onWindResize);
     if (map.attributionControl) map.attributionControl.addAttribution(WIND_ATTRIBUTION);
-    setStatus("Wind (Open-Meteo) on.");
+    setWindStatus("Loading wind…");
     clearInterval(windTimer);
     windTimer = setInterval(refreshWind, WIND_RECHECK_MS);
     refreshWind();
@@ -2581,7 +2618,7 @@
     windCtx = null;
     windField = null;
     windParticles = [];
-    windWarned = false;
+    windStatus = "";
     setToggle(els.windBtn, false);
   }
 
@@ -3445,7 +3482,17 @@
     ctx.font = "400 10px " + font;
     const credits = ["Radar: NWS NEXRAD / IEM"];
     if (lightningLayer) credits.push("Lightning: GOES GLM / SSEC RealEarth");
-    if (windOn) credits.push("Wind: Open-Meteo");
+    if (windOn) {
+      const asOf = windAsOf();
+      credits.push(
+        "Wind: Open-Meteo" +
+          (asOf
+            ? " (" +
+              new Date(asOf).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) +
+              ")"
+            : "")
+      );
+    }
     credits.push("© OpenStreetMap, © CARTO");
     const sep = "  ·  ";
     const creditLines = [];
@@ -3512,9 +3559,25 @@
 
   // --- Helpers -------------------------------------------------------------
 
+  // The wind overlay keeps its own "Loading wind…" / "Wind as of …" note on the
+  // end of whatever the radar last said, so the radar's 5-minute "updated"
+  // messages don't wipe it. See setWindStatus().
+  let statusBase = "";
+  let statusIsError = false;
+  let windStatus = "";
+  function renderStatus() {
+    const suffix = windOn && windStatus && !statusIsError ? " · " + windStatus : "";
+    els.status.textContent = statusBase + suffix;
+    els.status.classList.toggle("error", statusIsError);
+  }
   function setStatus(msg, isError) {
-    els.status.textContent = msg;
-    els.status.classList.toggle("error", !!isError);
+    statusBase = msg;
+    statusIsError = !!isError;
+    renderStatus();
+  }
+  function setWindStatus(text) {
+    windStatus = text;
+    renderStatus();
   }
 
   function timeNow() {
