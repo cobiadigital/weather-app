@@ -1026,7 +1026,8 @@ function tileBBox3857(z, x, y) {
 //     bi,bj  block row (south->north) and column (west->east); the block holds
 //            WIND_BLOCK x WIND_BLOCK points, point (r,c) sitting at
 //            lat = -90 + (bi*6 + r)*s, lon = -180 + (bj*6 + c)*s
-//   -> { s, bi, bj, spd: [36 mph|null], dir: [36 deg-from|null] }, row-major
+//   -> { s, bi, bj, t (unix s the values are for), spd: [36 mph|null],
+//        dir: [36 deg-from|null] }, row-major
 //
 // s/bi/bj are parsed numbers range-checked here, and the outbound coordinates
 // are computed from them, so nothing the client typed reaches the upstream URL.
@@ -1071,7 +1072,7 @@ async function handleWind(request, url, env) {
     : "https://api.open-meteo.com";
   const q =
     `latitude=${lats.join(",")}&longitude=${lons.join(",")}` +
-    "&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=mph" +
+    "&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=mph&timeformat=unixtime" +
     (env && env.OPEN_METEO_API_KEY
       ? "&apikey=" + encodeURIComponent(env.OPEN_METEO_API_KEY)
       : "");
@@ -1101,11 +1102,19 @@ async function handleWind(request, url, env) {
     return json({ error: "Wind upstream returned the wrong point count" }, 502);
   }
   const num = (v) => (typeof v === "number" && isFinite(v) ? +v.toFixed(1) : null);
+  // When the values are *for* (unix seconds), so the app can say how old they
+  // are. All points in a block share one model step; take the newest to be safe.
+  let t = null;
+  for (const p of list) {
+    const ts = p && p.current && p.current.time;
+    if (typeof ts === "number" && isFinite(ts) && (t === null || ts > t)) t = ts;
+  }
   return json(
     {
       s,
       bi,
       bj,
+      t,
       spd: list.map((p) => num(p && p.current && p.current.wind_speed_10m)),
       dir: list.map((p) => num(p && p.current && p.current.wind_direction_10m)),
     },

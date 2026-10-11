@@ -2298,7 +2298,14 @@
             v[i] = -sp * Math.cos(rad);
           }
         }
-        windBlocks.set(w.key, { at: Date.now(), u, v });
+        // `for` is when the values are valid (the model step), not when we
+        // fetched them: that's the age worth showing.
+        windBlocks.set(w.key, {
+          at: Date.now(),
+          for: typeof d.t === "number" ? d.t * 1000 : null,
+          u,
+          v,
+        });
         return true;
       })
       .catch(() => false)
@@ -2524,10 +2531,39 @@
     }
     const hadField = !!windField && !!windRaf;
     buildWindField();
+    // Say how old the data is when it's new to the screen (first load or a
+    // TTL refresh), not on every pan, so it doesn't drown other status text.
+    if (need.length && windField) {
+      const label = windAsOfLabel();
+      if (label) setStatus("Wind as of " + label + ".");
+    }
     // A background re-check (field already running and still valid) swaps the
     // data under the live particles without restarting them.
     if (hadField && windField) return;
     startWindAnim();
+  }
+
+  // Oldest valid-time among the blocks on screen (the honest "as of"), or null.
+  function windAsOf() {
+    if (!windOn) return null;
+    const wanted = windWantedBlocks(windSpacingFor(map.getZoom())) || [];
+    let t = null;
+    for (const w of wanted) {
+      const b = windBlocks.get(w.key);
+      if (b && b.for && (t === null || b.for < t)) t = b.for;
+    }
+    return t;
+  }
+
+  function windAsOfLabel() {
+    const t = windAsOf();
+    if (t === null) return "";
+    const clock = new Date(t).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+    return clock + " (" + (mins < 1 ? "just now" : mins + " min ago") + ")";
   }
 
   function onWindMoveStart() {
@@ -2565,7 +2601,7 @@
     map.on("moveend", onWindMoveEnd);
     map.on("resize", onWindResize);
     if (map.attributionControl) map.attributionControl.addAttribution(WIND_ATTRIBUTION);
-    setStatus("Wind (Open-Meteo) on.");
+    setStatus("Loading wind…");
     clearInterval(windTimer);
     windTimer = setInterval(refreshWind, WIND_RECHECK_MS);
     refreshWind();
@@ -3450,7 +3486,17 @@
     ctx.font = "400 10px " + font;
     const credits = ["Radar: NWS NEXRAD / IEM"];
     if (lightningLayer) credits.push("Lightning: GOES GLM / SSEC RealEarth");
-    if (windOn) credits.push("Wind: Open-Meteo");
+    if (windOn) {
+      const asOf = windAsOf();
+      credits.push(
+        "Wind: Open-Meteo" +
+          (asOf
+            ? " (" +
+              new Date(asOf).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) +
+              ")"
+            : "")
+      );
+    }
     credits.push("© OpenStreetMap, © CARTO");
     const sep = "  ·  ";
     const creditLines = [];
