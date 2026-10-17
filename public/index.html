@@ -344,6 +344,15 @@
         aria-label="Single-site radar product"
       ></div>
 
+      <!-- Optional overlay, independent of the radar product above. -->
+      <button id="buoyBtn" class="settings-link settings-switch" type="button" aria-pressed="false">
+        <span class="settings-option-text">
+          <span class="settings-option-title">Buoys</span>
+          <span class="settings-option-desc">NOAA buoy &amp; coastal stations. Tap a dot for conditions.</span>
+        </span>
+        <span class="settings-check" aria-hidden="true">✓</span>
+      </button>
+
       <a class="settings-link" href="/tropics">
         <span class="settings-option-text">
           <span class="settings-option-title">Tropics</span>
@@ -414,6 +423,7 @@
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
     ></script>
+    <script src="/buoys.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

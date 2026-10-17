@@ -333,6 +333,18 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     `prefers-reduced-motion` gets one still frame of streaks. `shareView()`
     draws the canvas with the same screen blend. It doesn't follow the radar
     loop (wind is a current snapshot) and it stays out of Cache Storage.
+- **Buoys (NOAA NDBC)** — an optional tap-for-conditions overlay on both `/`
+  (a **Buoys** switch in the settings sheet, so the footer icon row stays put)
+  and `/tropics` (a **Buoys** toggle). `GET /api/buoys` parses NDBC's
+  `latest_obs.txt` (newest report from every station, one small file) plus
+  `station_table.txt` (names/type, cached a day) into
+  `{ t, stations: [[id, lat, lon, name, kind, obs]] }`, dropping stations with
+  no usable reading; edge-cached 5 min. `public/buoys.js` is shared by both
+  pages (`Buoys.attach(map, {onStatus})`): viewport-culled `circleMarker` dots
+  capped at `MARKER_MAX`, each with an invisible 18px tap circle, popup in
+  imperial units. The choice persists in `localStorage` (`buoys.on`). It is not
+  composited into Share. Swell/wind-wave detail needs NDBC's per-station
+  `.spec` files and is not included.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES

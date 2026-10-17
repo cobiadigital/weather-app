@@ -363,6 +363,7 @@
     radarProductOptions: document.getElementById("radarProductOptions"),
     siteProductOptions: document.getElementById("siteProductOptions"),
     sitePickBtn: document.getElementById("sitePickBtn"),
+    buoyBtn: document.getElementById("buoyBtn"),
     sitePickDesc: document.getElementById("sitePickDesc"),
     sitePickBar: document.getElementById("sitePickBar"),
     sitePickMsg: document.getElementById("sitePickMsg"),
@@ -407,6 +408,7 @@
   let siteLoading = null; // in-flight fetch, so concurrent callers share one
   const siteProductCache = new Map(); // composite id -> synthesized product
   let sitePicking = false; // true while the map is in "tap a radar" mode
+  let buoys = null; // window.Buoys controller (buoys.js)
   let siteMarkerLayer = null; // L.layerGroup of pickable markers
   let selectedSiteMarker = null; // persistent marker for the chosen radar
   let siteRangeRing = null; // its coverage circle
@@ -561,6 +563,13 @@
       maxZoom: 19,
       crossOrigin: "anonymous",
     }).addTo(map);
+
+    // NDBC buoy dots (buoys.js). Its own overlay, so it never touches the
+    // radar product or the loop.
+    if (window.Buoys) {
+      buoys = window.Buoys.attach(map, { onStatus: setStatus });
+      if (els.buoyBtn) els.buoyBtn.setAttribute("aria-pressed", buoys.isEnabled() ? "true" : "false");
+    }
 
     radarLayer = buildRadarLayer().addTo(map);
     displayedProductId = effectiveProductId();
@@ -3635,6 +3644,15 @@
       els.siteProductOptions.addEventListener("click", onProductClick);
     }
     if (els.sitePickBtn) els.sitePickBtn.addEventListener("click", enterSitePicking);
+    if (els.buoyBtn) {
+      els.buoyBtn.addEventListener("click", () => {
+        if (!buoys) return;
+        buoys.setEnabled(!buoys.isEnabled());
+        els.buoyBtn.setAttribute("aria-pressed", buoys.isEnabled() ? "true" : "false");
+        // Reveal the map so the dots (and the status line) are visible.
+        if (buoys.isEnabled()) closeSettingsSheet();
+      });
+    }
     if (els.sitePickCancel) {
       els.sitePickCancel.addEventListener("click", () => {
         exitSitePicking();
