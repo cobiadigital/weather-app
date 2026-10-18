@@ -101,7 +101,16 @@
       return loading;
     }
 
-    function render() {
+    // Rebuilding the dots removes the layer that owns the open popup, which
+    // closes it. Tapping a dot near an edge autopans the map (moveend), and the
+    // 5-minute refresh also lands here, so both used to dismiss the popup the
+    // instant it opened. Defer while one is open and catch up when it closes.
+    let popupOpen = false;
+    let renderPending = false;
+
+    function render(force) {
+      if (popupOpen && !force) { renderPending = true; return; }
+      renderPending = false;
       if (layer) { map.removeLayer(layer); layer = null; }
       if (!on || !stations) return;
       const b = map.getBounds().pad(0.2);
@@ -129,6 +138,13 @@
           radius: 18, stroke: false, fillOpacity: 0, fillColor: "#000",
         })
           .bindPopup(() => popupHtml(st), { className: "buoy-pop", maxWidth: 280, autoPanPadding: [16, 80] })
+          .on("popupopen", () => { popupOpen = true; })
+          .on("popupclose", () => {
+            popupOpen = false;
+            // Next tick: tapping another dot closes this popup just before the
+            // new one opens, and rebuilding in between would eat the new one.
+            if (renderPending) setTimeout(() => { if (!popupOpen && renderPending) render(); }, 0);
+          })
           .addTo(layer);
       });
       layer.addTo(map);
@@ -145,14 +161,14 @@
       });
       clearInterval(timer);
       timer = setInterval(() => {
-        load(true).then(render).catch(() => {});
+        load(true).then(() => render()).catch(() => {});
       }, REFRESH_MS);
     }
 
     map.on("moveend", () => {
       if (!on) return;
       clearTimeout(moveTimer);
-      moveTimer = setTimeout(render, 120);
+      moveTimer = setTimeout(() => render(), 120);
     });
 
     if (on) show();
@@ -166,7 +182,8 @@
           show();
         } else {
           clearInterval(timer);
-          render();
+          popupOpen = false;
+          render(true);
           onStatus("Buoys hidden.");
         }
       },
