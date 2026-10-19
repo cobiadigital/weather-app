@@ -37,8 +37,10 @@
     return '<div class="buoy-row"><span>' + label + "</span><b>" + value + "</b></div>";
   }
 
-  function popupHtml(st) {
-    const o = st[5];
+  function popupHtml(st, detail) {
+    // latest_obs only has the newest line, which is often wave-less; the
+    // per-station detail fills in the freshest real value of each field.
+    const o = detail ? Object.assign({}, st[5], detail.obs) : st[5];
     const rows = [];
     if (has(o.wspd)) {
       let w = mph(o.wspd) + " mph";
@@ -49,7 +51,16 @@
     if (has(o.wvht)) {
       let w = ft(o.wvht) + " ft";
       if (has(o.dpd)) w += " at " + Math.round(o.dpd) + " s";
+      // Waves come in half-hourly, so say so when they trail the wind.
+      if (detail && detail.waveTs && o.ts - detail.waveTs >= 900) w += " (" + ago(detail.waveTs) + ")";
       rows.push(row("Waves", esc(w)));
+    }
+    const sp = detail && detail.spec;
+    if (sp && has(sp.swh)) {
+      rows.push(row("Swell", esc(ft(sp.swh) + " ft" + (has(sp.swp) ? " at " + Math.round(sp.swp) + " s" : "") + (sp.swd ? " from " + sp.swd : ""))));
+    }
+    if (sp && has(sp.wwh)) {
+      rows.push(row("Wind waves", esc(ft(sp.wwh) + " ft" + (has(sp.wwp) ? " at " + Math.round(sp.wwp) + " s" : "") + (sp.wwd ? " from " + sp.wwd : ""))));
     }
     if (has(o.apd) && !has(o.dpd)) rows.push(row("Avg wave period", Math.round(o.apd) + " s"));
     if (has(o.atmp)) rows.push(row("Air", esc(degF(o.atmp))));
@@ -90,6 +101,16 @@
     let loadedAt = 0;
 
     try { on = localStorage.getItem(STORE_KEY) === "1"; } catch (_) {}
+
+    // Per-station detail, fetched when a popup opens and kept for a few minutes.
+    const details = new Map();
+    function loadDetail(id) {
+      const hit = details.get(id);
+      if (hit && Date.now() - hit.at < REFRESH_MS) return Promise.resolve(hit.d);
+      return fetch("/api/buoys/" + encodeURIComponent(id.toLowerCase()))
+        .then((r) => { if (!r.ok) throw new Error("detail " + r.status); return r.json(); })
+        .then((d) => { details.set(id, { at: Date.now(), d: d }); return d; });
+    }
 
     function load(force) {
       if (loading) return loading;
@@ -137,8 +158,14 @@
         L.circleMarker([st[1], st[2]], {
           radius: 18, stroke: false, fillOpacity: 0, fillColor: "#000",
         })
-          .bindPopup(() => popupHtml(st), { className: "buoy-pop", maxWidth: 280, autoPanPadding: [16, 80] })
-          .on("popupopen", () => { popupOpen = true; })
+          .bindPopup(() => popupHtml(st, (details.get(st[0]) || {}).d), { className: "buoy-pop", maxWidth: 280, autoPanPadding: [16, 80] })
+          .on("popupopen", (e) => {
+            popupOpen = true;
+            const popup = e.popup;
+            loadDetail(st[0]).then((d) => {
+              if (popup.isOpen()) popup.setContent(popupHtml(st, d));
+            }).catch(() => { /* keep the summary the popup opened with */ });
+          })
           .on("popupclose", () => {
             popupOpen = false;
             // Next tick: tapping another dot closes this popup just before the

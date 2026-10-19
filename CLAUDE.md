@@ -346,8 +346,14 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
   pages (`Buoys.attach(map, {onStatus})`): viewport-culled `circleMarker` dots
   capped at `MARKER_MAX`, each with an invisible 18px tap circle, popup in
   imperial units. The choice persists in `localStorage` (`buoys.on`). It is not
-  composited into Share. Swell/wind-wave detail needs NDBC's per-station
-  `.spec` files and is not included.
+  composited into Share. `latest_obs` only holds each station's single newest
+  line, and many buoys report waves just twice an hour (winds every 10 min), so
+  that line is often wave-less. Opening a popup therefore also fetches
+  `GET /api/buoys/{id}` (id checked against `[a-z0-9]{5}`), which reads the
+  station's `realtime2/<id>.txt` history and returns, field by field, the newest
+  real value within 3 h (`waveTs` says how old the waves are), plus the swell /
+  wind-wave split from `<id>.spec` when the station has one. The popup opens
+  instantly with the summary and fills in when the detail lands.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES

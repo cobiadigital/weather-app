@@ -178,6 +178,10 @@ export default {
       return handleBuoys(request);
     }
 
+    if (pathname.startsWith("/api/buoys/")) {
+      return handleBuoyDetail(request, url);
+    }
+
     if (pathname.startsWith("/api/legend/")) {
       return handleLegend(request, url);
     }
@@ -1224,4 +1228,102 @@ async function handleBuoys(request) {
     stations.push([c[0].toUpperCase(), lat, lon, meta[0], meta[1], obs]);
   }
   return json({ t: newest, stations }, 200, BUOY_TTL_S);
+}
+
+// GET /api/buoys/{id} -> { id, obs, waveTs, spec }
+// latest_obs.txt only carries each station's single newest line, and many buoys
+// report waves just twice an hour while winds come every 10 minutes, so the
+// newest line is often wave-less ("MM") even though a wave reading from 20
+// minutes ago exists. This reads the station's own recent history and takes,
+// field by field, the newest real value within BUOY_LOOKBACK_S; `waveTs` says
+// when the wave fields are from. `spec` is the swell / wind-wave split from the
+// station's .spec file (absent for most stations). The id is the allowlisted
+// shape [a-z0-9]{5} (NDBC ids), so nothing else reaches the upstream path.
+const BUOY_ID_RE = /^[a-z0-9]{5}$/;
+const BUOY_LOOKBACK_S = 3 * 3600;
+const BUOY_HIST_COLS = {
+  WDIR: "wdir", WSPD: "wspd", GST: "gst", WVHT: "wvht", DPD: "dpd", APD: "apd",
+  PRES: "pres", PTDY: "ptdy", ATMP: "atmp", WTMP: "wtmp", DEWP: "dewp",
+  VIS: "vis", TIDE: "tide",
+};
+
+// NDBC realtime2 text: "#NAME NAME ..." header, a units line, then rows newest
+// first. Returns [{ ts, v: {COL: number} }] with MM / garbage left out.
+function parseNdbcRealtime(text) {
+  let cols = null;
+  const rows = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    if (line.charAt(0) === "#") {
+      if (!cols) cols = line.slice(1).trim().split(/\s+/);
+      continue;
+    }
+    if (!cols) continue;
+    const c = line.trim().split(/\s+/);
+    if (c.length < cols.length) continue;
+    const v = {};
+    for (let i = 0; i < cols.length; i++) {
+      if (c[i] === "MM") continue;
+      v[cols[i]] = c[i];
+    }
+    const ts = Date.UTC(+v.YY, +v.MM - 1, +v.DD, +v.hh, +v.mm) / 1000;
+    if (!isFinite(ts)) continue;
+    rows.push({ ts, v });
+  }
+  return rows;
+}
+
+async function handleBuoyDetail(request, url) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const id = decodeURIComponent(url.pathname.slice("/api/buoys/".length)).toLowerCase();
+  if (!BUOY_ID_RE.test(id)) {
+    return json({ error: "Bad station id" }, 400);
+  }
+  const get = async (ext) => {
+    try {
+      const res = await fetch(`https://www.ndbc.noaa.gov/data/realtime2/${id}.${ext}`, {
+        headers: { "User-Agent": USER_AGENT },
+        cf: { cacheTtl: BUOY_TTL_S, cacheEverything: true },
+      });
+      return res.ok ? await res.text() : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  const [txt, spec] = await Promise.all([get("txt"), get("spec")]);
+  if (!txt) return json({ error: "No data for station" }, 404);
+
+  const rows = parseNdbcRealtime(txt);
+  if (!rows.length) return json({ error: "No data for station" }, 404);
+  const newest = rows[0].ts;
+  const obs = { ts: newest };
+  let waveTs = null;
+  for (const r of rows) {
+    if (newest - r.ts > BUOY_LOOKBACK_S) break;
+    for (const col in BUOY_HIST_COLS) {
+      const key = BUOY_HIST_COLS[col];
+      if (key in obs || !(col in r.v)) continue;
+      const n = Number(r.v[col]);
+      if (!isFinite(n)) continue;
+      obs[key] = n;
+      if (key === "wvht") waveTs = r.ts;
+    }
+  }
+
+  let swell = null;
+  if (spec) {
+    const r = parseNdbcRealtime(spec)[0];
+    if (r && newest - r.ts <= BUOY_LOOKBACK_S) {
+      const n = (k) => (k in r.v && isFinite(Number(r.v[k])) ? Number(r.v[k]) : null);
+      const d = (k) => (k in r.v && /^[A-Z]{1,3}$/.test(r.v[k]) ? r.v[k] : null);
+      swell = {
+        ts: r.ts,
+        swh: n("SwH"), swp: n("SwP"), swd: d("SwD"),
+        wwh: n("WWH"), wwp: n("WWP"), wwd: d("WWD"),
+      };
+    }
+  }
+  return json({ id, obs, waveTs, spec: swell }, 200, BUOY_TTL_S);
 }
