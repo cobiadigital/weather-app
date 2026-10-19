@@ -65,6 +65,7 @@
     windsBtn: document.getElementById("windsBtn"),
     windsBtnLabel: document.getElementById("windsBtnLabel"),
     inundationBtn: document.getElementById("inundationBtn"),
+    buoyBtn: document.getElementById("buoyBtn"),
     refreshBtn: document.getElementById("refreshBtn"),
     stormSheet: document.getElementById("stormSheet"),
     stormList: document.getElementById("stormList"),
@@ -76,6 +77,7 @@
   };
 
   let map;
+  let buoys = null; // window.Buoys controller (buoys.js)
   let stormsLayer; // current-position markers
   let tracksLayer; // all model + official forecast lines
   let ptsLayer; // official forecast points (labeled dots)
@@ -196,6 +198,12 @@
     ptsLayer = L.layerGroup().addTo(map);
     investLayer = L.layerGroup().addTo(map);
     stormsLayer = L.layerGroup().addTo(map);
+
+    // NDBC buoy dots (buoys.js); off until the Buoys toggle is on.
+    if (window.Buoys) {
+      buoys = window.Buoys.attach(map, { onStatus: setStatus });
+      els.buoyBtn.setAttribute("aria-pressed", buoys.isEnabled() ? "true" : "false");
+    }
 
     // Debounced export refresh — MapServer /export is per-viewport.
     map.on("moveend zoomend resize", scheduleHazardOverlayRefresh);
@@ -1330,6 +1338,11 @@
     els.arrivalBtn.addEventListener("click", toggleArrival);
     els.windsBtn.addEventListener("click", toggleWinds);
     els.inundationBtn.addEventListener("click", toggleInundation);
+    els.buoyBtn.addEventListener("click", () => {
+      if (!buoys) return;
+      buoys.setEnabled(!buoys.isEnabled());
+      els.buoyBtn.setAttribute("aria-pressed", buoys.isEnabled() ? "true" : "false");
+    });
     els.refreshBtn.addEventListener("click", () => loadStorms(true));
     els.shareBtn.addEventListener("click", shareView);
 

@@ -326,13 +326,34 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     bilinearly, never as speed/direction, since compass angles don't average.
     A coarse screen-space grid (`WIND_NODE_PX`) is rebuilt per view and the
     particles sample that; Web Mercator keeps north up, so u is +x and v is -y.
-  - One `<canvas class="wind-canvas">` is appended to the map container (z 500,
-    `mix-blend-mode: screen`), not a tile layer, so it **pauses and clears on
+  - One `<canvas class="wind-canvas">` lives in a custom `windPane` (z 350,
+    `mix-blend-mode: screen` on the pane, since a z-indexed pane is its own
+    stacking context; re-pinned to the screen origin on `moveend`). It must stay
+    inside the map pane: when it was on the map container (z 500) it painted over
+    popups (z 700). Not a tile layer, so it **pauses and clears on
     `movestart`**: a canvas that doesn't pan with the tiles would show wind in
     the wrong place. ~30 fps, particle count scales with screen area, and
     `prefers-reduced-motion` gets one still frame of streaks. `shareView()`
     draws the canvas with the same screen blend. It doesn't follow the radar
     loop (wind is a current snapshot) and it stays out of Cache Storage.
+- **Buoys (NOAA NDBC)** — an optional tap-for-conditions overlay on both `/`
+  (a **Buoys** switch in the settings sheet, so the footer icon row stays put)
+  and `/tropics` (a **Buoys** toggle). `GET /api/buoys` parses NDBC's
+  `latest_obs.txt` (newest report from every station, one small file) plus
+  `station_table.txt` (names/type, cached a day) into
+  `{ t, stations: [[id, lat, lon, name, kind, obs]] }`, dropping stations with
+  no usable reading; edge-cached 5 min. `public/buoys.js` is shared by both
+  pages (`Buoys.attach(map, {onStatus})`): viewport-culled `circleMarker` dots
+  capped at `MARKER_MAX`, each with an invisible 18px tap circle, popup in
+  imperial units. The choice persists in `localStorage` (`buoys.on`). It is not
+  composited into Share. `latest_obs` only holds each station's single newest
+  line, and many buoys report waves just twice an hour (winds every 10 min), so
+  that line is often wave-less. Opening a popup therefore also fetches
+  `GET /api/buoys/{id}` (id checked against `[a-z0-9]{5}`), which reads the
+  station's `realtime2/<id>.txt` history and returns, field by field, the newest
+  real value within 3 h (`waveTs` says how old the waves are), plus the swell /
+  wind-wave split from `<id>.spec` when the station has one. The popup opens
+  instantly with the summary and fills in when the detail lands.
 - **Clouds (satellite)** — GOES East infrared composite, also from IEM:
   `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png`.
   NEXRAD is precipitation only, so cloud cover comes from this separate GOES

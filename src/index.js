@@ -174,6 +174,14 @@ export default {
       return handleWind(request, url, env);
     }
 
+    if (pathname === "/api/buoys") {
+      return handleBuoys(request);
+    }
+
+    if (pathname.startsWith("/api/buoys/")) {
+      return handleBuoyDetail(request, url);
+    }
+
     if (pathname.startsWith("/api/legend/")) {
       return handleLegend(request, url);
     }
@@ -1132,4 +1140,190 @@ function json(obj, status = 200, cacheSeconds = 0) {
     headers["cache-control"] = "public, max-age=" + cacheSeconds;
   }
   return new Response(JSON.stringify(obj), { status, headers });
+}
+
+// --- Buoys (NOAA NDBC) --------------------------------------------------------
+//
+// GET /api/buoys -> { t, stations: [[id, lat, lon, name, kind, obs], ...] }
+// NDBC's latest_obs.txt is one small text file holding the newest report from
+// every station (buoys, C-MAN coastal stations, ships), so a single fetch feeds
+// the whole map. station_table.txt supplies the human names and station type.
+// `obs` is a keyed object with only the fields the station reported, in SI-ish
+// units the client converts: wdir deg, wspd/gst m/s, wvht m, dpd/apd s, pres/
+// ptdy hPa, atmp/wtmp/dewp C, vis nmi, tide ft, and `ts` (unix seconds).
+// Stations with no usable reading are dropped.
+const NDBC_LATEST_URL = "https://www.ndbc.noaa.gov/data/latest_obs/latest_obs.txt";
+const NDBC_TABLE_URL = "https://www.ndbc.noaa.gov/data/stations/station_table.txt";
+const BUOY_TTL_S = 300;
+const BUOY_NAMES_TTL_S = 86400;
+const BUOY_FIELDS = [
+  ["wdir", 8], ["wspd", 9], ["gst", 10], ["wvht", 11], ["dpd", 12], ["apd", 13],
+  ["pres", 15], ["ptdy", 16], ["atmp", 17], ["wtmp", 18], ["dewp", 19],
+  ["vis", 20], ["tide", 21],
+];
+
+async function handleBuoys(request) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  let obsText;
+  try {
+    const res = await fetch(NDBC_LATEST_URL, {
+      headers: { "User-Agent": USER_AGENT },
+      cf: { cacheTtl: BUOY_TTL_S, cacheEverything: true },
+    });
+    if (!res.ok) return json({ error: "Buoy upstream error", status: res.status }, 502);
+    obsText = await res.text();
+  } catch (e) {
+    return json({ error: "Buoy upstream unreachable" }, 502);
+  }
+
+  // Names are a nicety: if the table is down, stations still show by id.
+  const names = Object.create(null);
+  try {
+    const res = await fetch(NDBC_TABLE_URL, {
+      headers: { "User-Agent": USER_AGENT },
+      cf: { cacheTtl: BUOY_NAMES_TTL_S, cacheEverything: true },
+    });
+    if (res.ok) {
+      for (const line of (await res.text()).split("\n")) {
+        if (line.charAt(0) === "#") continue;
+        const f = line.split("|");
+        if (f.length < 5 || !f[0]) continue;
+        const type = (f[2] || "").toLowerCase();
+        const kind = type.includes("buoy") || type.includes("drifter") ? "buoy"
+          : type.includes("c-man") || type.includes("weather station") ? "station"
+          : "other";
+        names[f[0].trim().toLowerCase()] = [(f[4] || "").trim(), kind];
+      }
+    }
+  } catch (e) {
+    /* ids only */
+  }
+
+  const stations = [];
+  let newest = 0;
+  for (const line of obsText.split("\n")) {
+    if (!line || line.charAt(0) === "#") continue;
+    const c = line.trim().split(/\s+/);
+    if (c.length < 22) continue;
+    const lat = Number(c[1]);
+    const lon = Number(c[2]);
+    if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
+    const ts = Date.UTC(+c[3], +c[4] - 1, +c[5], +c[6], +c[7]) / 1000;
+    if (!isFinite(ts)) continue;
+    const obs = { ts };
+    let any = false;
+    for (const [key, i] of BUOY_FIELDS) {
+      if (c[i] === "MM") continue;
+      const v = Number(c[i]);
+      if (!isFinite(v)) continue;
+      obs[key] = v;
+      any = true;
+    }
+    if (!any) continue;
+    if (ts > newest) newest = ts;
+    const id = c[0].toLowerCase();
+    const meta = names[id] || ["", "other"];
+    stations.push([c[0].toUpperCase(), lat, lon, meta[0], meta[1], obs]);
+  }
+  return json({ t: newest, stations }, 200, BUOY_TTL_S);
+}
+
+// GET /api/buoys/{id} -> { id, obs, waveTs, spec }
+// latest_obs.txt only carries each station's single newest line, and many buoys
+// report waves just twice an hour while winds come every 10 minutes, so the
+// newest line is often wave-less ("MM") even though a wave reading from 20
+// minutes ago exists. This reads the station's own recent history and takes,
+// field by field, the newest real value within BUOY_LOOKBACK_S; `waveTs` says
+// when the wave fields are from. `spec` is the swell / wind-wave split from the
+// station's .spec file (absent for most stations). The id is the allowlisted
+// shape [a-z0-9]{5} (NDBC ids), so nothing else reaches the upstream path.
+const BUOY_ID_RE = /^[a-z0-9]{5}$/;
+const BUOY_LOOKBACK_S = 3 * 3600;
+const BUOY_HIST_COLS = {
+  WDIR: "wdir", WSPD: "wspd", GST: "gst", WVHT: "wvht", DPD: "dpd", APD: "apd",
+  PRES: "pres", PTDY: "ptdy", ATMP: "atmp", WTMP: "wtmp", DEWP: "dewp",
+  VIS: "vis", TIDE: "tide",
+};
+
+// NDBC realtime2 text: "#NAME NAME ..." header, a units line, then rows newest
+// first. Returns [{ ts, v: {COL: number} }] with MM / garbage left out.
+function parseNdbcRealtime(text) {
+  let cols = null;
+  const rows = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    if (line.charAt(0) === "#") {
+      if (!cols) cols = line.slice(1).trim().split(/\s+/);
+      continue;
+    }
+    if (!cols) continue;
+    const c = line.trim().split(/\s+/);
+    if (c.length < cols.length) continue;
+    const v = {};
+    for (let i = 0; i < cols.length; i++) {
+      if (c[i] === "MM") continue;
+      v[cols[i]] = c[i];
+    }
+    const ts = Date.UTC(+v.YY, +v.MM - 1, +v.DD, +v.hh, +v.mm) / 1000;
+    if (!isFinite(ts)) continue;
+    rows.push({ ts, v });
+  }
+  return rows;
+}
+
+async function handleBuoyDetail(request, url) {
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  const id = decodeURIComponent(url.pathname.slice("/api/buoys/".length)).toLowerCase();
+  if (!BUOY_ID_RE.test(id)) {
+    return json({ error: "Bad station id" }, 400);
+  }
+  const get = async (ext) => {
+    try {
+      const res = await fetch(`https://www.ndbc.noaa.gov/data/realtime2/${id}.${ext}`, {
+        headers: { "User-Agent": USER_AGENT },
+        cf: { cacheTtl: BUOY_TTL_S, cacheEverything: true },
+      });
+      return res.ok ? await res.text() : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  const [txt, spec] = await Promise.all([get("txt"), get("spec")]);
+  if (!txt) return json({ error: "No data for station" }, 404);
+
+  const rows = parseNdbcRealtime(txt);
+  if (!rows.length) return json({ error: "No data for station" }, 404);
+  const newest = rows[0].ts;
+  const obs = { ts: newest };
+  let waveTs = null;
+  for (const r of rows) {
+    if (newest - r.ts > BUOY_LOOKBACK_S) break;
+    for (const col in BUOY_HIST_COLS) {
+      const key = BUOY_HIST_COLS[col];
+      if (key in obs || !(col in r.v)) continue;
+      const n = Number(r.v[col]);
+      if (!isFinite(n)) continue;
+      obs[key] = n;
+      if (key === "wvht") waveTs = r.ts;
+    }
+  }
+
+  let swell = null;
+  if (spec) {
+    const r = parseNdbcRealtime(spec)[0];
+    if (r && newest - r.ts <= BUOY_LOOKBACK_S) {
+      const n = (k) => (k in r.v && isFinite(Number(r.v[k])) ? Number(r.v[k]) : null);
+      const d = (k) => (k in r.v && /^[A-Z]{1,3}$/.test(r.v[k]) ? r.v[k] : null);
+      swell = {
+        ts: r.ts,
+        swh: n("SwH"), swp: n("SwP"), swd: d("SwD"),
+        wwh: n("WWH"), wwp: n("WWP"), wwd: d("WWD"),
+      };
+    }
+  }
+  return json({ id, obs, waveTs, spec: swell }, 200, BUOY_TTL_S);
 }

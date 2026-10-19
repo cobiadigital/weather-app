@@ -169,6 +169,8 @@
   const WIND_BLOCK = 6;
   const WIND_TTL_MS = 15 * 60 * 1000; // Open-Meteo "current" is a 15-min value
   const WIND_RECHECK_MS = 5 * 60 * 1000; // beat that re-fetches expired blocks
+  const WIND_FETCH_PARALLEL = 4; // blocks in flight at once (a burst of 16 trips Open-Meteo's rate limit)
+  const WIND_RETRY_MS = [2500, 6000, 15000]; // back-off for blocks that failed to load
   const WIND_MAX_FETCH = 16; // blocks per view; wider than this asks to zoom in
   const WIND_KEEP_BLOCKS = 48; // blocks held in memory before the oldest go
   const WIND_NODE_PX = 16; // screen-space field resolution (particles sample it)
@@ -363,6 +365,7 @@
     radarProductOptions: document.getElementById("radarProductOptions"),
     siteProductOptions: document.getElementById("siteProductOptions"),
     sitePickBtn: document.getElementById("sitePickBtn"),
+    buoyBtn: document.getElementById("buoyBtn"),
     sitePickDesc: document.getElementById("sitePickDesc"),
     sitePickBar: document.getElementById("sitePickBar"),
     sitePickMsg: document.getElementById("sitePickMsg"),
@@ -407,6 +410,7 @@
   let siteLoading = null; // in-flight fetch, so concurrent callers share one
   const siteProductCache = new Map(); // composite id -> synthesized product
   let sitePicking = false; // true while the map is in "tap a radar" mode
+  let buoys = null; // window.Buoys controller (buoys.js)
   let siteMarkerLayer = null; // L.layerGroup of pickable markers
   let selectedSiteMarker = null; // persistent marker for the chosen radar
   let siteRangeRing = null; // its coverage circle
@@ -561,6 +565,13 @@
       maxZoom: 19,
       crossOrigin: "anonymous",
     }).addTo(map);
+
+    // NDBC buoy dots (buoys.js). Its own overlay, so it never touches the
+    // radar product or the loop.
+    if (window.Buoys) {
+      buoys = window.Buoys.attach(map, { onStatus: setStatus });
+      if (els.buoyBtn) els.buoyBtn.setAttribute("aria-pressed", buoys.isEnabled() ? "true" : "false");
+    }
 
     radarLayer = buildRadarLayer().addTo(map);
     displayedProductId = effectiveProductId();
@@ -2237,6 +2248,8 @@
   let windRaf = 0;
   let windLast = 0;
   let windTimer = null;
+  let windRetryTimer = null;
+  let windRetries = 0; // consecutive retry rounds for the current view
   let windSeq = 0; // bumps on every move/refresh so stale async work bows out
   const windBlocks = new Map(); // "s:bi:bj" -> { at, u, v } (Float32Array x36)
   const windInflight = new Map(); // "s:bi:bj" -> Promise
@@ -2484,6 +2497,15 @@
     windCanvas.width = Math.round(size.x * dpr);
     windCanvas.height = Math.round(size.y * dpr);
     windCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    windCanvas.style.width = size.x + "px";
+    windCanvas.style.height = size.y + "px";
+    positionWindCanvas();
+  }
+
+  // The canvas lives in a map pane (so popups, z 700, stack above it) and so
+  // travels with the pane while panning; pin it back to the screen's top-left.
+  function positionWindCanvas() {
+    if (windCanvas) L.DomUtil.setPosition(windCanvas, map.containerPointToLayerPoint([0, 0]));
   }
 
   // Fetch whatever the view needs that we don't hold (or that has expired),
@@ -2509,14 +2531,30 @@
     });
     if (need.length) {
       setWindStatus("Loading wind…");
-      const results = await Promise.all(need.map(fetchWindBlock));
+      // A small pool rather than Promise.all: a full view is up to 16 blocks of
+      // 36 points each, and firing them together gets some rejected (429/502).
+      // A rejected block used to stay a hole in the field until the next pan.
+      const results = new Array(need.length).fill(false);
+      let next = 0;
+      const worker = async () => {
+        while (next < need.length) {
+          const i = next++;
+          results[i] = await fetchWindBlock(need[i]);
+          if (seq !== windSeq || !windOn) return;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(WIND_FETCH_PARALLEL, need.length) }, worker));
       if (seq !== windSeq || !windOn) return; // the view moved on, or wind was switched off
       const failed = results.filter((ok) => !ok).length;
       if (failed && failed === need.length && !wanted.some((w) => windBlocks.has(w.key))) {
         setWindStatus("Wind unavailable");
+        scheduleWindRetry();
         return;
       }
     }
+    // Any wanted block still missing is a hole in the picture: try again soon.
+    if (wanted.some((w) => !windBlocks.has(w.key))) scheduleWindRetry();
+    else windRetries = 0;
     // Keep memory bounded: Map iterates in insertion order, so the head is the
     // oldest fetch. Anything the current view needs was just (re)inserted or is
     // fresh, so drop from the front but never a wanted key.
@@ -2537,6 +2575,12 @@
     // data under the live particles without restarting them.
     if (hadField && windField) return;
     startWindAnim();
+  }
+
+  function scheduleWindRetry() {
+    clearTimeout(windRetryTimer);
+    if (!windOn || windRetries >= WIND_RETRY_MS.length) return;
+    windRetryTimer = setTimeout(refreshWind, WIND_RETRY_MS[windRetries++]);
   }
 
   // Oldest valid-time among the blocks on screen (the honest "as of"), or null.
@@ -2564,6 +2608,8 @@
 
   function onWindMoveStart() {
     windSeq++; // cancel any refresh still waiting on the network
+    clearTimeout(windRetryTimer);
+    windRetries = 0;
     windField = null;
     stopWindAnim();
     clearWindCanvas();
@@ -2571,6 +2617,7 @@
 
   function onWindMoveEnd() {
     // Force a restart: the field belongs to the old view.
+    positionWindCanvas();
     windField = null;
     refreshWind();
   }
@@ -2591,7 +2638,14 @@
     windCanvas = document.createElement("canvas");
     windCanvas.className = "wind-canvas";
     windCtx = windCanvas.getContext("2d");
-    map.getContainer().appendChild(windCanvas);
+    // Above the tiles (200) but below the vector overlays (400), markers (600) and popups (700). The screen
+    // blend goes on the pane: a pane with a z-index is its own stacking
+    // context, so a blend set on the canvas would only see the pane's contents.
+    const windPane = map.getPane("windPane") || map.createPane("windPane");
+    windPane.style.zIndex = 350;
+    windPane.style.pointerEvents = "none";
+    windPane.style.mixBlendMode = "screen";
+    windPane.appendChild(windCanvas);
     sizeWindCanvas();
     map.on("movestart", onWindMoveStart);
     map.on("moveend", onWindMoveEnd);
@@ -2606,6 +2660,7 @@
   function stopWind() {
     windOn = false;
     windSeq++;
+    clearTimeout(windRetryTimer);
     clearInterval(windTimer);
     windTimer = null;
     stopWindAnim();
@@ -3635,6 +3690,15 @@
       els.siteProductOptions.addEventListener("click", onProductClick);
     }
     if (els.sitePickBtn) els.sitePickBtn.addEventListener("click", enterSitePicking);
+    if (els.buoyBtn) {
+      els.buoyBtn.addEventListener("click", () => {
+        if (!buoys) return;
+        buoys.setEnabled(!buoys.isEnabled());
+        els.buoyBtn.setAttribute("aria-pressed", buoys.isEnabled() ? "true" : "false");
+        // Reveal the map so the dots (and the status line) are visible.
+        if (buoys.isEnabled()) closeSettingsSheet();
+      });
+    }
     if (els.sitePickCancel) {
       els.sitePickCancel.addEventListener("click", () => {
         exitSitePicking();
