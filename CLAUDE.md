@@ -326,8 +326,11 @@ base reflectivity is IEM-sourced with its own time-enabled WMS loop.
     bilinearly, never as speed/direction, since compass angles don't average.
     A coarse screen-space grid (`WIND_NODE_PX`) is rebuilt per view and the
     particles sample that; Web Mercator keeps north up, so u is +x and v is -y.
-  - One `<canvas class="wind-canvas">` is appended to the map container (z 500,
-    `mix-blend-mode: screen`), not a tile layer, so it **pauses and clears on
+  - One `<canvas class="wind-canvas">` lives in a custom `windPane` (z 350,
+    `mix-blend-mode: screen` on the pane, since a z-indexed pane is its own
+    stacking context; re-pinned to the screen origin on `moveend`). It must stay
+    inside the map pane: when it was on the map container (z 500) it painted over
+    popups (z 700). Not a tile layer, so it **pauses and clears on
     `movestart`**: a canvas that doesn't pan with the tiles would show wind in
     the wrong place. ~30 fps, particle count scales with screen area, and
     `prefers-reduced-motion` gets one still frame of streaks. `shareView()`

@@ -393,12 +393,11 @@ button,
    rather than vanish into it. shareView() mirrors the blend. */
 .wind-canvas {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  top: 0;
+  left: 0;
   pointer-events: none;
-  z-index: 500; /* above the map pane (400), below the controls (1000) */
-  mix-blend-mode: screen;
+  /* Lives in #windPane (z 350, screen-blended): above the radar tiles, below vector
+     overlays, markers and popups. Size and position are set in JS. */
 }
 
 /* Active/pressed toggle state. */

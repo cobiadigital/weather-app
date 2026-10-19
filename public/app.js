@@ -2497,6 +2497,15 @@
     windCanvas.width = Math.round(size.x * dpr);
     windCanvas.height = Math.round(size.y * dpr);
     windCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    windCanvas.style.width = size.x + "px";
+    windCanvas.style.height = size.y + "px";
+    positionWindCanvas();
+  }
+
+  // The canvas lives in a map pane (so popups, z 700, stack above it) and so
+  // travels with the pane while panning; pin it back to the screen's top-left.
+  function positionWindCanvas() {
+    if (windCanvas) L.DomUtil.setPosition(windCanvas, map.containerPointToLayerPoint([0, 0]));
   }
 
   // Fetch whatever the view needs that we don't hold (or that has expired),
@@ -2608,6 +2617,7 @@
 
   function onWindMoveEnd() {
     // Force a restart: the field belongs to the old view.
+    positionWindCanvas();
     windField = null;
     refreshWind();
   }
@@ -2628,7 +2638,14 @@
     windCanvas = document.createElement("canvas");
     windCanvas.className = "wind-canvas";
     windCtx = windCanvas.getContext("2d");
-    map.getContainer().appendChild(windCanvas);
+    // Above the tiles (200) but below the vector overlays (400), markers (600) and popups (700). The screen
+    // blend goes on the pane: a pane with a z-index is its own stacking
+    // context, so a blend set on the canvas would only see the pane's contents.
+    const windPane = map.getPane("windPane") || map.createPane("windPane");
+    windPane.style.zIndex = 350;
+    windPane.style.pointerEvents = "none";
+    windPane.style.mixBlendMode = "screen";
+    windPane.appendChild(windCanvas);
     sizeWindCanvas();
     map.on("movestart", onWindMoveStart);
     map.on("moveend", onWindMoveEnd);
