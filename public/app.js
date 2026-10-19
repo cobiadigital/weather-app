@@ -169,6 +169,8 @@
   const WIND_BLOCK = 6;
   const WIND_TTL_MS = 15 * 60 * 1000; // Open-Meteo "current" is a 15-min value
   const WIND_RECHECK_MS = 5 * 60 * 1000; // beat that re-fetches expired blocks
+  const WIND_FETCH_PARALLEL = 4; // blocks in flight at once (a burst of 16 trips Open-Meteo's rate limit)
+  const WIND_RETRY_MS = [2500, 6000, 15000]; // back-off for blocks that failed to load
   const WIND_MAX_FETCH = 16; // blocks per view; wider than this asks to zoom in
   const WIND_KEEP_BLOCKS = 48; // blocks held in memory before the oldest go
   const WIND_NODE_PX = 16; // screen-space field resolution (particles sample it)
@@ -2246,6 +2248,8 @@
   let windRaf = 0;
   let windLast = 0;
   let windTimer = null;
+  let windRetryTimer = null;
+  let windRetries = 0; // consecutive retry rounds for the current view
   let windSeq = 0; // bumps on every move/refresh so stale async work bows out
   const windBlocks = new Map(); // "s:bi:bj" -> { at, u, v } (Float32Array x36)
   const windInflight = new Map(); // "s:bi:bj" -> Promise
@@ -2518,14 +2522,30 @@
     });
     if (need.length) {
       setWindStatus("Loading wind…");
-      const results = await Promise.all(need.map(fetchWindBlock));
+      // A small pool rather than Promise.all: a full view is up to 16 blocks of
+      // 36 points each, and firing them together gets some rejected (429/502).
+      // A rejected block used to stay a hole in the field until the next pan.
+      const results = new Array(need.length).fill(false);
+      let next = 0;
+      const worker = async () => {
+        while (next < need.length) {
+          const i = next++;
+          results[i] = await fetchWindBlock(need[i]);
+          if (seq !== windSeq || !windOn) return;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(WIND_FETCH_PARALLEL, need.length) }, worker));
       if (seq !== windSeq || !windOn) return; // the view moved on, or wind was switched off
       const failed = results.filter((ok) => !ok).length;
       if (failed && failed === need.length && !wanted.some((w) => windBlocks.has(w.key))) {
         setWindStatus("Wind unavailable");
+        scheduleWindRetry();
         return;
       }
     }
+    // Any wanted block still missing is a hole in the picture: try again soon.
+    if (wanted.some((w) => !windBlocks.has(w.key))) scheduleWindRetry();
+    else windRetries = 0;
     // Keep memory bounded: Map iterates in insertion order, so the head is the
     // oldest fetch. Anything the current view needs was just (re)inserted or is
     // fresh, so drop from the front but never a wanted key.
@@ -2546,6 +2566,12 @@
     // data under the live particles without restarting them.
     if (hadField && windField) return;
     startWindAnim();
+  }
+
+  function scheduleWindRetry() {
+    clearTimeout(windRetryTimer);
+    if (!windOn || windRetries >= WIND_RETRY_MS.length) return;
+    windRetryTimer = setTimeout(refreshWind, WIND_RETRY_MS[windRetries++]);
   }
 
   // Oldest valid-time among the blocks on screen (the honest "as of"), or null.
@@ -2573,6 +2599,8 @@
 
   function onWindMoveStart() {
     windSeq++; // cancel any refresh still waiting on the network
+    clearTimeout(windRetryTimer);
+    windRetries = 0;
     windField = null;
     stopWindAnim();
     clearWindCanvas();
@@ -2615,6 +2643,7 @@
   function stopWind() {
     windOn = false;
     windSeq++;
+    clearTimeout(windRetryTimer);
     clearInterval(windTimer);
     windTimer = null;
     stopWindAnim();
